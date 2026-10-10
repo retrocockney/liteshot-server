@@ -13,9 +13,10 @@ io.on('connection', (socket) => {
     players[socket.id] = {
         id: socket.id,
         x: (Math.random() - 0.5) * 40,
-        y: 2,
+        y: 1.8,
         z: (Math.random() - 0.5) * 40,
-        yaw: 0
+        yaw: 0,
+        health: 100
     };
 
     socket.emit('currentPlayers', players);
@@ -29,6 +30,14 @@ io.on('connection', (socket) => {
             players[socket.id].yaw = data.yaw;
             socket.broadcast.emit('playerMoved', players[socket.id]);
         }
+    });
+
+    // Relay damage from shooter to target player
+    socket.on('hitPlayer', (hitData) => {
+        io.to(hitData.targetId).emit('playerHit', {
+            damage: hitData.damage,
+            attackerId: socket.id
+        });
     });
 
     socket.on('disconnect', () => {
