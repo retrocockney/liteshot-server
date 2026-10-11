@@ -13,7 +13,7 @@ io.on('connection', (socket) => {
     players[socket.id] = {
         id: socket.id,
         x: (Math.random() - 0.5) * 40,
-        y: 1.8,
+        y: 2.2,
         z: (Math.random() - 0.5) * 40,
         yaw: 0,
         health: 100
@@ -34,11 +34,14 @@ io.on('connection', (socket) => {
 
     // Relay damage from shooter to target player
     socket.on('hitPlayer', (hitData) => {
-        io.to(hitData.targetId).emit('playerHit', {
-            damage: hitData.damage,
-            attackerId: socket.id
-        });
+    if (!hitData || typeof hitData.targetId !== 'string') return;
+    if (hitData.targetId === socket.id || !players[hitData.targetId]) return;
+    const damage = Math.min(100, Math.max(0, Number(hitData.damage) || 0));
+    io.to(hitData.targetId).emit('playerHit', {
+        damage: damage,
+        attackerId: socket.id
     });
+});
 
     socket.on('disconnect', () => {
         delete players[socket.id];
