@@ -17,19 +17,27 @@ io.on('connection', (socket) => {
         z: (Math.random() - 0.5) * 40,
         yaw: 0,
         name: 'Operative',
-        color: 0x00ffcc
+        color: 0x00ffcc,
+        visor: 0x00ffcc,
+        helmet: 'visor',
+        armor: 'heavy'
     };
 
     socket.emit('currentPlayers', players);
     socket.broadcast.emit('newPlayer', players[socket.id]);
 
-    // Player chose a callsign and armor color
+    // Callsign and appearance chosen on the start screen
     socket.on('setIdentity', (data) => {
         const p = players[socket.id];
         if (!p || !data) return;
         p.name = String(data.name || 'Operative').slice(0, 12);
         p.color = Number.isFinite(data.color) ? data.color : 0x00ffcc;
-        io.emit('playerIdentity', { id: socket.id, name: p.name, color: p.color });
+        p.visor = Number.isFinite(data.visor) ? data.visor : p.color;
+        p.helmet = ['visor', 'full', 'scout'].includes(data.helmet) ? data.helmet : 'visor';
+        p.armor = ['heavy', 'light', 'none'].includes(data.armor) ? data.armor : 'heavy';
+        io.emit('playerIdentity', {
+            id: p.id, name: p.name, color: p.color, visor: p.visor, helmet: p.helmet, armor: p.armor
+        });
     });
 
     socket.on('playerMovement', (data) => {
