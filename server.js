@@ -123,7 +123,7 @@ io.on('connection', (socket) => {
     socket.on('setIdentity', (data) => {
         const p = players[socket.id];
         if (!p || !data) return;
-        p.name = String(data.name || 'Operative').slice(0, 12);
+        p.name = String(data.name || 'Operative').slice(0, 40);
         p.color = Number.isFinite(data.color) ? data.color : 0x00ffcc;
         p.visor = Number.isFinite(data.visor) ? data.visor : p.color;
         p.helmet = ['visor', 'full', 'scout'].includes(data.helmet) ? data.helmet : 'visor';
