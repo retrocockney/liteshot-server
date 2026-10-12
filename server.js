@@ -41,8 +41,12 @@ function endMatch() {
 let pickupState = null;
 const RESPAWN_MS = { weapon: 20000, kit: 12000, grenade: 15000 };
 
+// Armour emblems are small pictures sent as text; keep them to a sensible size
+const MAX_EMBLEM_CHARS = 40000;
+
 io.on('connection', (socket) => {
     console.log('Player connected:', socket.id);
+    let lastChatAt = 0;
 
     players[socket.id] = {
         id: socket.id,
@@ -55,6 +59,7 @@ io.on('connection', (socket) => {
         visor: 0x00ffcc,
         helmet: 'visor',
         armor: 'heavy',
+        emblem: null,
         kills: 0,
         deaths: 0
     };
@@ -114,6 +119,7 @@ io.on('connection', (socket) => {
         else socket.emit('matchStart', { msRemaining: Math.max(0, matchEndsAt - Date.now()) });
     });
 
+    // Callsign, looks and armour emblem chosen on the start screen
     socket.on('setIdentity', (data) => {
         const p = players[socket.id];
         if (!p || !data) return;
@@ -122,8 +128,13 @@ io.on('connection', (socket) => {
         p.visor = Number.isFinite(data.visor) ? data.visor : p.color;
         p.helmet = ['visor', 'full', 'scout'].includes(data.helmet) ? data.helmet : 'visor';
         p.armor = ['heavy', 'light', 'none'].includes(data.armor) ? data.armor : 'heavy';
+        if (typeof data.emblem === 'string' && data.emblem.startsWith('data:image/') && data.emblem.length <= MAX_EMBLEM_CHARS) {
+            p.emblem = data.emblem;
+        } else {
+            p.emblem = null;
+        }
         io.emit('playerIdentity', {
-            id: p.id, name: p.name, color: p.color, visor: p.visor, helmet: p.helmet, armor: p.armor
+            id: p.id, name: p.name, color: p.color, visor: p.visor, helmet: p.helmet, armor: p.armor, emblem: p.emblem
         });
     });
 
@@ -134,6 +145,18 @@ io.on('connection', (socket) => {
         players[socket.id].z = data.z;
         players[socket.id].yaw = data.yaw;
         socket.broadcast.emit('playerMoved', players[socket.id]);
+    });
+
+    // Text chat: everyone sees it. Short messages, and a short gap between them.
+    socket.on('chat', (data) => {
+        const p = players[socket.id];
+        if (!p || !data) return;
+        const now = Date.now();
+        if (now - lastChatAt < 700) return;
+        lastChatAt = now;
+        const text = String(data.text || '').replace(/[<>]/g, '').trim().slice(0, 140);
+        if (!text) return;
+        io.emit('chat', { id: socket.id, name: p.name, text: text });
     });
 
     // Shooter hit another player: tell the target
