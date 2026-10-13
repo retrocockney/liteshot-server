@@ -45,6 +45,36 @@ const RESPAWN_MS = { weapon: 20000, kit: 12000, grenade: 15000 };
 const MAX_EMBLEM_CHARS = 40000;
 const MAX_NAME_CHARS = 40;
 
+// ---- PRESENCE: friend codes and who is online (a separate connection that doesn't join a game) ----
+const CODE_RE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/;
+const presenceNs = io.of('/presence');
+const presenceCodes = {};   // code -> { name, sid }
+
+presenceNs.on('connection', (s) => {
+    let myCode = null;
+    s.on('hello', (d) => {
+        if (!d || !CODE_RE.test(d.code)) return;
+        if (myCode && presenceCodes[myCode] && presenceCodes[myCode].sid === s.id) delete presenceCodes[myCode];
+        myCode = d.code;
+        presenceCodes[myCode] = { name: String(d.name || 'Operative').slice(0, MAX_NAME_CHARS), sid: s.id };
+    });
+    s.on('query', (codes) => {
+        if (!Array.isArray(codes)) return;
+        const list = codes
+            .filter(c => typeof c === 'string' && CODE_RE.test(c))
+            .slice(0, 50)
+            .map(c => ({
+                code: c,
+                name: presenceCodes[c] ? presenceCodes[c].name : null,
+                online: !!presenceCodes[c]
+            }));
+        s.emit('status', list);
+    });
+    s.on('disconnect', () => {
+        if (myCode && presenceCodes[myCode] && presenceCodes[myCode].sid === s.id) delete presenceCodes[myCode];
+    });
+});
+
 io.on('connection', (socket) => {
     console.log('Player connected:', socket.id);
     let lastChatAt = 0;
