@@ -43,6 +43,7 @@ const RESPAWN_MS = { weapon: 20000, kit: 12000, grenade: 15000 };
 
 // Armour emblems are small pictures sent as text; keep them to a sensible size
 const MAX_EMBLEM_CHARS = 40000;
+const MAX_NAME_CHARS = 40;
 
 io.on('connection', (socket) => {
     console.log('Player connected:', socket.id);
@@ -123,7 +124,7 @@ io.on('connection', (socket) => {
     socket.on('setIdentity', (data) => {
         const p = players[socket.id];
         if (!p || !data) return;
-        p.name = String(data.name || 'Operative').slice(0, 40);
+        p.name = String(data.name || 'Operative').slice(0, MAX_NAME_CHARS);
         p.color = Number.isFinite(data.color) ? data.color : 0x00ffcc;
         p.visor = Number.isFinite(data.visor) ? data.visor : p.color;
         p.helmet = ['visor', 'full', 'scout'].includes(data.helmet) ? data.helmet : 'visor';
@@ -138,13 +139,15 @@ io.on('connection', (socket) => {
         });
     });
 
+    // Position only: sending the whole player record (including emblems) would flood everyone's connection
     socket.on('playerMovement', (data) => {
         if (!data || !players[socket.id]) return;
-        players[socket.id].x = data.x;
-        players[socket.id].y = data.y;
-        players[socket.id].z = data.z;
-        players[socket.id].yaw = data.yaw;
-        socket.broadcast.emit('playerMoved', players[socket.id]);
+        const p = players[socket.id];
+        p.x = Number(data.x) || 0;
+        p.y = Number(data.y) || 0;
+        p.z = Number(data.z) || 0;
+        p.yaw = Number(data.yaw) || 0;
+        socket.broadcast.emit('playerMoved', { id: socket.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw });
     });
 
     // Text chat: everyone sees it. Short messages, and a short gap between them.
