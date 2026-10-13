@@ -46,10 +46,10 @@ function endMatch(mapName) {
     io.to(mapName).emit('matchEnd', { scores: scoreList(lobby) });
 }
 
-// ---- PRESENCE: friend codes and who is online (separate from lobbies) ----
+// ---- PRESENCE: friend codes, who is online, and invites (separate from lobbies) ----
 const CODE_RE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/;
 const presenceNs = io.of('/presence');
-const presenceCodes = {};
+const presenceCodes = {};   // code -> { name, sid, map, inOnline }
 
 presenceNs.on('connection', (s) => {
     let myCode = null;
@@ -57,7 +57,12 @@ presenceNs.on('connection', (s) => {
         if (!d || !CODE_RE.test(d.code)) return;
         if (myCode && presenceCodes[myCode] && presenceCodes[myCode].sid === s.id) delete presenceCodes[myCode];
         myCode = d.code;
-        presenceCodes[myCode] = { name: String(d.name || 'Operative').slice(0, MAX_NAME_CHARS), sid: s.id };
+        presenceCodes[myCode] = {
+            name: String(d.name || 'Operative').slice(0, MAX_NAME_CHARS),
+            sid: s.id,
+            map: d.map === 'mini' ? 'mini' : 'og',
+            inOnline: !!d.online
+        };
     });
     s.on('query', (codes) => {
         if (!Array.isArray(codes)) return;
@@ -67,9 +72,20 @@ presenceNs.on('connection', (s) => {
             .map(c => ({
                 code: c,
                 name: presenceCodes[c] ? presenceCodes[c].name : null,
-                online: !!presenceCodes[c]
+                online: !!presenceCodes[c],
+                map: presenceCodes[c] ? presenceCodes[c].map : null,
+                inOnline: presenceCodes[c] ? presenceCodes[c].inOnline : false
             }));
         s.emit('status', list);
+    });
+    // A friend in a PVP game invites another friend: they get a banner with JOIN / DECLINE
+    s.on('invite', (d) => {
+        const me = myCode ? presenceCodes[myCode] : null;
+        const target = d && CODE_RE.test(d.to) ? presenceCodes[d.to] : null;
+        if (!me || !me.inOnline) return s.emit('inviteResult', { to: d && d.to, ok: false, reason: 'Start a PVP game first' });
+        if (!target) return s.emit('inviteResult', { to: d.to, ok: false, reason: 'That friend is offline' });
+        presenceNs.to(target.sid).emit('invited', { from: myCode, name: me.name, map: me.map });
+        s.emit('inviteResult', { to: d.to, ok: true });
     });
     s.on('disconnect', () => {
         if (myCode && presenceCodes[myCode] && presenceCodes[myCode].sid === s.id) delete presenceCodes[myCode];
