@@ -45,6 +45,9 @@ const RESPAWN_MS = { weapon: 20000, kit: 12000, grenade: 15000 };
 const MAX_EMBLEM_CHARS = 40000;
 const MAX_NAME_CHARS = 40;
 
+// ---- MAP: everyone in an online game plays the same map (the first player's choice) ----
+let serverMap = null;
+
 // ---- PRESENCE: friend codes and who is online (a separate connection that doesn't join a game) ----
 const CODE_RE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/;
 const presenceNs = io.of('/presence');
@@ -97,6 +100,7 @@ io.on('connection', (socket) => {
 
     socket.emit('currentPlayers', players);
     socket.broadcast.emit('newPlayer', players[socket.id]);
+    if (serverMap) socket.emit('mapInfo', { map: serverMap });
 
     // Match: the first player starts one; later players join the current one
     if (!matchRunning && Object.keys(players).length === 1) {
@@ -150,7 +154,7 @@ io.on('connection', (socket) => {
         else socket.emit('matchStart', { msRemaining: Math.max(0, matchEndsAt - Date.now()) });
     });
 
-    // Callsign, looks and armour emblem chosen on the start screen
+    // Callsign, looks, armour emblem and map chosen on the start screen
     socket.on('setIdentity', (data) => {
         const p = players[socket.id];
         if (!p || !data) return;
@@ -163,6 +167,10 @@ io.on('connection', (socket) => {
             p.emblem = data.emblem;
         } else {
             p.emblem = null;
+        }
+        if (!serverMap && (data.map === 'og' || data.map === 'world')) {
+            serverMap = data.map;
+            io.emit('mapInfo', { map: serverMap });
         }
         io.emit('playerIdentity', {
             id: p.id, name: p.name, color: p.color, visor: p.visor, helmet: p.helmet, armor: p.armor, emblem: p.emblem
@@ -226,6 +234,7 @@ io.on('connection', (socket) => {
         console.log('Player disconnected:', socket.id);
         delete players[socket.id];
         io.emit('playerDisconnected', socket.id);
+        if (Object.keys(players).length === 0) serverMap = null;   // an empty server can pick a new map
     });
 });
 
