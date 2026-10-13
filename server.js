@@ -18,7 +18,7 @@ function newLobby() {
     VEHICLE_IDS.forEach(id => { vehicles[id] = { riderId: null, x: null, z: null }; });
     return { players: {}, matchRunning: false, matchEndsAt: 0, matchTimeout: null, pickupState: null, vehicles: vehicles };
 }
-const lobbies = { og: newLobby(), world: newLobby() };
+const lobbies = { og: newLobby(), mini: newLobby() };
 
 function scoreList(lobby) {
     return Object.values(lobby.players)
@@ -78,7 +78,7 @@ presenceNs.on('connection', (s) => {
 
 io.on('connection', (socket) => {
     // The map this player's game was built with decides which lobby they join
-    const mapName = socket.handshake.query && socket.handshake.query.map === 'world' ? 'world' : 'og';
+    const mapName = socket.handshake.query && socket.handshake.query.map === 'mini' ? 'mini' : 'og';
     const lobby = lobbies[mapName];
     console.log('Player connected to', mapName, socket.id);
     let lastChatAt = 0;
