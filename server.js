@@ -11,8 +11,12 @@ const MAX_NAME_CHARS = 40;
 const MATCH_MS = 5 * 60 * 1000;
 const RESPAWN_MS = { weapon: 20000, kit: 12000, grenade: 15000 };
 
+// Four vehicles per lobby (two scooters, two pigs). The map places them; the server only tracks who rides them.
+const VEHICLE_IDS = ['v0', 'v1', 'v2', 'v3'];
 function newLobby() {
-    return { players: {}, matchRunning: false, matchEndsAt: 0, matchTimeout: null, pickupState: null };
+    const vehicles = {};
+    VEHICLE_IDS.forEach(id => { vehicles[id] = { riderId: null, x: null, z: null }; });
+    return { players: {}, matchRunning: false, matchEndsAt: 0, matchTimeout: null, pickupState: null, vehicles: vehicles };
 }
 const lobbies = { og: newLobby(), world: newLobby() };
 
@@ -97,6 +101,7 @@ io.on('connection', (socket) => {
     };
 
     socket.emit('currentPlayers', lobby.players);
+    socket.emit('vehicleStates', VEHICLE_IDS.map(id => Object.assign({ id: id }, lobby.vehicles[id])));
     socket.to(mapName).emit('newPlayer', lobby.players[socket.id]);
 
     if (!lobby.matchRunning && Object.keys(lobby.players).length === 1) {
@@ -142,6 +147,23 @@ io.on('connection', (socket) => {
             item.active = true;
             io.to(mapName).emit('pickupRespawn', { kind: d.kind, id: d.id });
         }, RESPAWN_MS[d.kind]);
+    });
+
+    socket.on('mountVehicle', (d) => {
+        const v = d && lobby.vehicles[d.id];
+        if (!v) return;
+        if (v.riderId && v.riderId !== socket.id) { socket.emit('mountDenied', { id: d.id }); return; }
+        v.riderId = socket.id;
+        io.to(mapName).emit('vehicleChanged', { id: d.id, riderId: socket.id, x: null, z: null });
+    });
+
+    socket.on('dismountVehicle', (d) => {
+        const v = d && lobby.vehicles[d.id];
+        if (!v || v.riderId !== socket.id) return;
+        v.riderId = null;
+        v.x = Number(d.x) || 0;
+        v.z = Number(d.z) || 0;
+        io.to(mapName).emit('vehicleChanged', { id: d.id, riderId: null, x: v.x, z: v.z });
     });
 
     socket.on('restartMatch', () => {
@@ -218,6 +240,16 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         console.log('Player disconnected from', mapName, socket.id);
+        // Anyone riding a vehicle gets off where they were
+        const me = lobby.players[socket.id];
+        VEHICLE_IDS.forEach(id => {
+            const v = lobby.vehicles[id];
+            if (v.riderId !== socket.id) return;
+            v.riderId = null;
+            v.x = me ? me.x : 0;
+            v.z = me ? me.z : 0;
+            io.to(mapName).emit('vehicleChanged', { id: id, riderId: null, x: v.x, z: v.z });
+        });
         delete lobby.players[socket.id];
         io.to(mapName).emit('playerDisconnected', socket.id);
         if (Object.keys(lobby.players).length === 0) {
