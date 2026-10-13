@@ -49,46 +49,105 @@ function endMatch(mapName) {
 // ---- PRESENCE: friend codes, who is online, and invites (separate from lobbies) ----
 const CODE_RE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/;
 const presenceNs = io.of('/presence');
-const presenceCodes = {};   // code -> { name, sid, map, inOnline }
+const presenceCodes = Object.create(null);   // code -> currently connected presence socket
+const knownProfiles = Object.create(null);   // code -> last known operative tag/map (memory only)
+
+function cleanCode(value) {
+    return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+function emitFriendStatuses() {
+    // Clients already poll with "query"; this event also lets them refresh immediately.
+    presenceNs.emit('presenceChanged', { at: Date.now() });
+}
 
 presenceNs.on('connection', (s) => {
     let myCode = null;
+
     s.on('hello', (d) => {
-        if (!d || !CODE_RE.test(d.code)) return;
-        if (myCode && presenceCodes[myCode] && presenceCodes[myCode].sid === s.id) delete presenceCodes[myCode];
-        myCode = d.code;
-        presenceCodes[myCode] = {
-            name: String(d.name || 'Operative').slice(0, MAX_NAME_CHARS),
+        if (!d) return;
+        const code = cleanCode(d.code);
+        if (!CODE_RE.test(code)) {
+            s.emit('helloError', { reason: 'Invalid friend code. Codes must be 6 valid characters.' });
+            return;
+        }
+
+        // If this socket previously registered a different code, remove its old online entry.
+        if (myCode && presenceCodes[myCode] && presenceCodes[myCode].sid === s.id) {
+            delete presenceCodes[myCode];
+        }
+
+        myCode = code;
+        const previous = knownProfiles[code] || {};
+        const name = String(d.name || previous.name || 'Operative').trim().slice(0, MAX_NAME_CHARS) || 'Operative';
+        const map = d.map === 'mini' ? 'mini' : 'og';
+        const profile = { code, name, map };
+        knownProfiles[code] = profile;
+        presenceCodes[code] = {
+            code,
+            name,
             sid: s.id,
-            map: d.map === 'mini' ? 'mini' : 'og',
-            inOnline: !!d.online
+            map,
+            inOnline: d.online === true || d.online === 1 || d.online === 'true',
+            lastSeen: Date.now()
         };
+        s.emit('helloAck', { code, name });
+        emitFriendStatuses();
     });
+
     s.on('query', (codes) => {
         if (!Array.isArray(codes)) return;
         const list = codes
-            .filter(c => typeof c === 'string' && CODE_RE.test(c))
+            .map(cleanCode)
+            .filter((code) => CODE_RE.test(code))
             .slice(0, 50)
-            .map(c => ({
-                code: c,
-                name: presenceCodes[c] ? presenceCodes[c].name : null,
-                online: !!presenceCodes[c],
-                map: presenceCodes[c] ? presenceCodes[c].map : null,
-                inOnline: presenceCodes[c] ? presenceCodes[c].inOnline : false
-            }));
+            .map((code) => {
+                const live = presenceCodes[code];
+                const profile = knownProfiles[code];
+                return {
+                    code,
+                    found: !!profile,
+                    name: live ? live.name : (profile ? profile.name : null),
+                    online: !!live,
+                    map: live ? live.map : (profile ? profile.map : null),
+                    inOnline: live ? !!live.inOnline : false,
+                    lastSeen: live ? live.lastSeen : null
+                };
+            });
         s.emit('status', list);
     });
-    // A friend in a PVP game invites another friend: they get a banner with JOIN / DECLINE
-    s.on('invite', (d) => {
-        const me = myCode ? presenceCodes[myCode] : null;
-        const target = d && CODE_RE.test(d.to) ? presenceCodes[d.to] : null;
-        if (!me || !me.inOnline) return s.emit('inviteResult', { to: d && d.to, ok: false, reason: 'Start a PVP game first' });
-        if (!target) return s.emit('inviteResult', { to: d.to, ok: false, reason: 'That friend is offline' });
-        presenceNs.to(target.sid).emit('invited', { from: myCode, name: me.name, map: me.map });
-        s.emit('inviteResult', { to: d.to, ok: true });
+
+    // Refresh a player's PVP state without needing to reconnect the presence socket.
+    s.on('activity', (d) => {
+        if (!myCode || !presenceCodes[myCode] || presenceCodes[myCode].sid !== s.id) return;
+        presenceCodes[myCode].inOnline = !!(d && d.online);
+        if (d && (d.map === 'mini' || d.map === 'og')) presenceCodes[myCode].map = d.map;
+        presenceCodes[myCode].lastSeen = Date.now();
+        const p = knownProfiles[myCode];
+        if (p) p.map = presenceCodes[myCode].map;
+        emitFriendStatuses();
     });
+
+    s.on('invite', (d) => {
+        const to = cleanCode(d && d.to);
+        const me = myCode ? presenceCodes[myCode] : null;
+        const target = CODE_RE.test(to) ? presenceCodes[to] : null;
+        if (!me || !me.inOnline) {
+            s.emit('inviteResult', { to, ok: false, reason: 'Start a PVP game first' });
+            return;
+        }
+        if (!target) {
+            s.emit('inviteResult', { to, ok: false, reason: 'That friend is offline' });
+            return;
+        }
+        presenceNs.to(target.sid).emit('invited', { from: myCode, name: me.name, map: me.map });
+        s.emit('inviteResult', { to, ok: true });
+    });
+
     s.on('disconnect', () => {
-        if (myCode && presenceCodes[myCode] && presenceCodes[myCode].sid === s.id) delete presenceCodes[myCode];
+        if (myCode && presenceCodes[myCode] && presenceCodes[myCode].sid === s.id) {
+            delete presenceCodes[myCode];
+            emitFriendStatuses();
+        }
     });
 });
 
