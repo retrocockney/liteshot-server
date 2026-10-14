@@ -4,10 +4,9 @@ const app = express();
 const path = require('path');
 const http = require('http').createServer(app);
 
-// ---- LITESHOT updater ----
-// Keep LITESHOT_latest.html beside this server file.
-// Version 49 is retained because this is a server-only gameplay update.
-const GAME_VERSION = 49;
+// ---- LITESHOT web updater: Version 51 ----
+// Keep LITESHOT_latest.html beside this file in the Render deployment.
+const GAME_VERSION = 51;
 const LATEST_GAME_FILE = path.join(__dirname, 'LITESHOT_latest.html');
 
 function setUpdateHeaders(res, contentType) {
@@ -52,7 +51,6 @@ const io = require('socket.io')(http, {
     cors: { origin: '*' }
 });
 
-// ---- LOBBIES ----
 const MAX_EMBLEM_CHARS = 40000;
 const MAX_NAME_CHARS = 40;
 const MATCH_MS = 5 * 60 * 1000;
@@ -108,7 +106,6 @@ function scoreList(lobby) {
 function startMatch(mapName) {
     const lobby = lobbies[mapName];
 
-    // Reset who has already hit whom at the start of each match.
     lobby.damagePairs.clear();
 
     for (const id in lobby.players) {
@@ -142,10 +139,9 @@ function endMatch(mapName) {
     });
 }
 
-// ---- PRESENCE: friend codes, status and invites ----
+// ---- Presence / friend codes ----
 const CODE_RE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/;
 const presenceNs = io.of('/presence');
-
 const presenceCodes = Object.create(null);
 const knownProfiles = Object.create(null);
 
@@ -194,8 +190,7 @@ presenceNs.on('connection', (s) => {
 
         const map = d.map === 'mini' ? 'mini' : 'og';
 
-        const profile = { code, name, map };
-        knownProfiles[code] = profile;
+        knownProfiles[code] = { code, name, map };
 
         presenceCodes[code] = {
             code,
@@ -259,10 +254,9 @@ presenceNs.on('connection', (s) => {
 
         presenceCodes[myCode].lastSeen = Date.now();
 
-        const p = knownProfiles[myCode];
-
-        if (p) {
-            p.map = presenceCodes[myCode].map;
+        const profile = knownProfiles[myCode];
+        if (profile) {
+            profile.map = presenceCodes[myCode].map;
         }
 
         emitFriendStatuses();
@@ -312,7 +306,7 @@ presenceNs.on('connection', (s) => {
     });
 });
 
-// ---- MULTIPLAYER CONNECTIONS ----
+// ---- Multiplayer ----
 io.on('connection', (socket) => {
     const mapName =
         socket.handshake.query &&
@@ -325,7 +319,6 @@ io.on('connection', (socket) => {
     console.log('Player connected to', mapName, socket.id);
 
     let lastChatAt = 0;
-
     socket.join(mapName);
 
     lobby.players[socket.id] = {
@@ -394,21 +387,21 @@ io.on('connection', (socket) => {
         }
 
         const clean = (list, prefix, extra) =>
-            list.slice(0, 8).map((s, i) =>
+            list.slice(0, 8).map((item, i) =>
                 Object.assign({
                     id: prefix + i,
-                    x: Number(s.x) || 0,
-                    z: Number(s.z) || 0,
+                    x: Number(item.x) || 0,
+                    z: Number(item.z) || 0,
                     active: true
-                }, extra(s))
+                }, extra(item))
             );
 
         lobby.pickupState = {
             weapons: clean(
                 spots.weapons,
                 'w',
-                s => ({
-                    type: s.type === 'sniper'
+                item => ({
+                    type: item.type === 'sniper'
                         ? 'sniper'
                         : 'shotgun'
                 })
@@ -433,11 +426,9 @@ io.on('connection', (socket) => {
         };
 
         const list = lists[d.kind];
-
         if (!list) return;
 
         const item = list.find(i => i.id === d.id);
-
         if (!item || !item.active) return;
 
         item.active = false;
@@ -458,16 +449,15 @@ io.on('connection', (socket) => {
     });
 
     socket.on('mountVehicle', (d) => {
-        const v = d && lobby.vehicles[d.id];
+        const vehicle = d && lobby.vehicles[d.id];
+        if (!vehicle) return;
 
-        if (!v) return;
-
-        if (v.riderId && v.riderId !== socket.id) {
+        if (vehicle.riderId && vehicle.riderId !== socket.id) {
             socket.emit('mountDenied', { id: d.id });
             return;
         }
 
-        v.riderId = socket.id;
+        vehicle.riderId = socket.id;
 
         io.to(mapName).emit('vehicleChanged', {
             id: d.id,
@@ -478,19 +468,19 @@ io.on('connection', (socket) => {
     });
 
     socket.on('dismountVehicle', (d) => {
-        const v = d && lobby.vehicles[d.id];
+        const vehicle = d && lobby.vehicles[d.id];
 
-        if (!v || v.riderId !== socket.id) return;
+        if (!vehicle || vehicle.riderId !== socket.id) return;
 
-        v.riderId = null;
-        v.x = Number(d.x) || 0;
-        v.z = Number(d.z) || 0;
+        vehicle.riderId = null;
+        vehicle.x = Number(d.x) || 0;
+        vehicle.z = Number(d.z) || 0;
 
         io.to(mapName).emit('vehicleChanged', {
             id: d.id,
             riderId: null,
-            x: v.x,
-            z: v.z
+            x: vehicle.x,
+            z: vehicle.z
         });
     });
 
@@ -508,27 +498,26 @@ io.on('connection', (socket) => {
     });
 
     socket.on('setIdentity', (data) => {
-        const p = lobby.players[socket.id];
+        const player = lobby.players[socket.id];
+        if (!player || !data) return;
 
-        if (!p || !data) return;
-
-        p.name = String(
+        player.name = String(
             data.name || 'Operative'
         ).slice(0, MAX_NAME_CHARS);
 
-        p.color = Number.isFinite(data.color)
+        player.color = Number.isFinite(data.color)
             ? data.color
             : 0x00ffcc;
 
-        p.visor = Number.isFinite(data.visor)
+        player.visor = Number.isFinite(data.visor)
             ? data.visor
-            : p.color;
+            : player.color;
 
-        p.helmet = ['visor', 'full', 'scout'].includes(data.helmet)
+        player.helmet = ['visor', 'full', 'scout'].includes(data.helmet)
             ? data.helmet
             : 'visor';
 
-        p.armor = ['heavy', 'light', 'none'].includes(data.armor)
+        player.armor = ['heavy', 'light', 'none'].includes(data.armor)
             ? data.armor
             : 'heavy';
 
@@ -537,50 +526,46 @@ io.on('connection', (socket) => {
             data.emblem.startsWith('data:image/') &&
             data.emblem.length <= MAX_EMBLEM_CHARS
         ) {
-            p.emblem = data.emblem;
+            player.emblem = data.emblem;
         } else {
-            p.emblem = null;
+            player.emblem = null;
         }
 
         io.to(mapName).emit('playerIdentity', {
-            id: p.id,
-            name: p.name,
-            color: p.color,
-            visor: p.visor,
-            helmet: p.helmet,
-            armor: p.armor,
-            emblem: p.emblem
+            id: player.id,
+            name: player.name,
+            color: player.color,
+            visor: player.visor,
+            helmet: player.helmet,
+            armor: player.armor,
+            emblem: player.emblem
         });
     });
 
     socket.on('playerMovement', (data) => {
         if (!data || !lobby.players[socket.id]) return;
 
-        const p = lobby.players[socket.id];
-
-        p.x = Number(data.x) || 0;
-        p.y = Number(data.y) || 0;
-        p.z = Number(data.z) || 0;
-        p.yaw = Number(data.yaw) || 0;
+        const player = lobby.players[socket.id];
+        player.x = Number(data.x) || 0;
+        player.y = Number(data.y) || 0;
+        player.z = Number(data.z) || 0;
+        player.yaw = Number(data.yaw) || 0;
 
         socket.to(mapName).emit('playerMoved', {
             id: socket.id,
-            x: p.x,
-            y: p.y,
-            z: p.z,
-            yaw: p.yaw
+            x: player.x,
+            y: player.y,
+            z: player.z,
+            yaw: player.yaw
         });
     });
 
     socket.on('chat', (data) => {
-        const p = lobby.players[socket.id];
-
-        if (!p || !data) return;
+        const player = lobby.players[socket.id];
+        if (!player || !data) return;
 
         const now = Date.now();
-
         if (now - lastChatAt < 700) return;
-
         lastChatAt = now;
 
         const text = String(data.text || '')
@@ -592,19 +577,14 @@ io.on('connection', (socket) => {
 
         io.to(mapName).emit('chat', {
             id: socket.id,
-            name: p.name,
+            name: player.name,
             text
         });
     });
 
-    // ---- STEALTH ATTACKS ----
+    // ---- Existing stealth-attack rule ----
     socket.on('hitPlayer', (hitData) => {
-        if (
-            !hitData ||
-            typeof hitData.targetId !== 'string'
-        ) {
-            return;
-        }
+        if (!hitData || typeof hitData.targetId !== 'string') return;
 
         if (
             hitData.targetId === socket.id ||
@@ -618,8 +598,6 @@ io.on('connection', (socket) => {
             hitData.weapon || 'Unknown'
         ).slice(0, 12);
 
-        // A firearm gets 100 damage if this target has not
-        // previously landed a hit on the attacker this match.
         const isFirearm = [
             'Rifle',
             'Pistol',
@@ -638,11 +616,8 @@ io.on('connection', (socket) => {
             Math.max(0, Number(hitData.damage) || 0)
         );
 
-        const damage = stealthAttack
-            ? 100
-            : normalDamage;
+        const damage = stealthAttack ? 100 : normalDamage;
 
-        // Record that this attacker has hit this target.
         lobby.damagePairs.add(`${socket.id}->${targetId}`);
 
         io.to(targetId).emit('playerHit', {
@@ -663,7 +638,6 @@ io.on('connection', (socket) => {
 
     socket.on('playerDied', (data) => {
         const victim = lobby.players[socket.id];
-
         if (!victim) return;
 
         const killer =
@@ -701,19 +675,18 @@ io.on('connection', (socket) => {
         const me = lobby.players[socket.id];
 
         VEHICLE_IDS.forEach(id => {
-            const v = lobby.vehicles[id];
+            const vehicle = lobby.vehicles[id];
+            if (vehicle.riderId !== socket.id) return;
 
-            if (v.riderId !== socket.id) return;
-
-            v.riderId = null;
-            v.x = me ? me.x : 0;
-            v.z = me ? me.z : 0;
+            vehicle.riderId = null;
+            vehicle.x = me ? me.x : 0;
+            vehicle.z = me ? me.z : 0;
 
             io.to(mapName).emit('vehicleChanged', {
                 id,
                 riderId: null,
-                x: v.x,
-                z: v.z
+                x: vehicle.x,
+                z: vehicle.z
             });
         });
 
