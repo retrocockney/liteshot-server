@@ -4,7 +4,9 @@ const app = express();
 const path = require('path');
 const http = require('http').createServer(app);
 
-// ---- LITESHOT AUTOMATIC UPDATER ----
+// ---- LITESHOT updater ----
+// Keep LITESHOT_latest.html beside this server file.
+// Version 49 is retained because this is a server-only gameplay update.
 const GAME_VERSION = 49;
 const LATEST_GAME_FILE = path.join(__dirname, 'LITESHOT_latest.html');
 
@@ -12,7 +14,10 @@ function setUpdateHeaders(res, contentType) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader(
+        'Cache-Control',
+        'no-store, no-cache, must-revalidate, proxy-revalidate'
+    );
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
 
@@ -28,10 +33,7 @@ app.options('/updates/:file', (req, res) => {
 
 app.get('/updates/version.json', (req, res) => {
     setUpdateHeaders(res, 'application/json; charset=utf-8');
-    res.json({
-        game: 'LITESHOT',
-        version: GAME_VERSION
-    });
+    res.json({ game: 'LITESHOT', version: GAME_VERSION });
 });
 
 app.get('/updates/latest.html', (req, res) => {
@@ -39,21 +41,22 @@ app.get('/updates/latest.html', (req, res) => {
 
     res.sendFile(LATEST_GAME_FILE, (err) => {
         if (err && !res.headersSent) {
-            res.status(503).type('text/plain').send(
-                'LITESHOT update file is not installed on the server yet.'
-            );
+            res.status(503)
+                .type('text/plain')
+                .send('LITESHOT update file is not installed on the server yet.');
         }
     });
 });
 
-// ---- MULTIPLAYER SERVER ----
 const io = require('socket.io')(http, {
     cors: { origin: '*' }
 });
 
+// ---- LOBBIES ----
 const MAX_EMBLEM_CHARS = 40000;
 const MAX_NAME_CHARS = 40;
 const MATCH_MS = 5 * 60 * 1000;
+
 const RESPAWN_MS = {
     weapon: 20000,
     kit: 12000,
@@ -79,7 +82,8 @@ function newLobby() {
         matchEndsAt: 0,
         matchTimeout: null,
         pickupState: null,
-        vehicles
+        vehicles,
+        damagePairs: new Set()
     };
 }
 
@@ -103,6 +107,9 @@ function scoreList(lobby) {
 
 function startMatch(mapName) {
     const lobby = lobbies[mapName];
+
+    // Reset who has already hit whom at the start of each match.
+    lobby.damagePairs.clear();
 
     for (const id in lobby.players) {
         lobby.players[id].kills = 0;
@@ -135,9 +142,10 @@ function endMatch(mapName) {
     });
 }
 
-// ---- PRESENCE AND FRIEND INVITES ----
+// ---- PRESENCE: friend codes, status and invites ----
 const CODE_RE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/;
 const presenceNs = io.of('/presence');
+
 const presenceCodes = Object.create(null);
 const knownProfiles = Object.create(null);
 
@@ -153,10 +161,10 @@ function emitFriendStatuses() {
     });
 }
 
-presenceNs.on('connection', s => {
+presenceNs.on('connection', (s) => {
     let myCode = null;
 
-    s.on('hello', d => {
+    s.on('hello', (d) => {
         if (!d) return;
 
         const code = cleanCode(d.code);
@@ -186,11 +194,8 @@ presenceNs.on('connection', s => {
 
         const map = d.map === 'mini' ? 'mini' : 'og';
 
-        knownProfiles[code] = {
-            code,
-            name,
-            map
-        };
+        const profile = { code, name, map };
+        knownProfiles[code] = profile;
 
         presenceCodes[code] = {
             code,
@@ -208,7 +213,7 @@ presenceNs.on('connection', s => {
         emitFriendStatuses();
     });
 
-    s.on('query', codes => {
+    s.on('query', (codes) => {
         if (!Array.isArray(codes)) return;
 
         const list = codes
@@ -237,12 +242,14 @@ presenceNs.on('connection', s => {
         s.emit('status', list);
     });
 
-    s.on('activity', d => {
+    s.on('activity', (d) => {
         if (
             !myCode ||
             !presenceCodes[myCode] ||
             presenceCodes[myCode].sid !== s.id
-        ) return;
+        ) {
+            return;
+        }
 
         presenceCodes[myCode].inOnline = !!(d && d.online);
 
@@ -252,21 +259,19 @@ presenceNs.on('connection', s => {
 
         presenceCodes[myCode].lastSeen = Date.now();
 
-        const profile = knownProfiles[myCode];
+        const p = knownProfiles[myCode];
 
-        if (profile) {
-            profile.map = presenceCodes[myCode].map;
+        if (p) {
+            p.map = presenceCodes[myCode].map;
         }
 
         emitFriendStatuses();
     });
 
-    s.on('invite', d => {
+    s.on('invite', (d) => {
         const to = cleanCode(d && d.to);
         const me = myCode ? presenceCodes[myCode] : null;
-        const target = CODE_RE.test(to)
-            ? presenceCodes[to]
-            : null;
+        const target = CODE_RE.test(to) ? presenceCodes[to] : null;
 
         if (!me || !me.inOnline) {
             s.emit('inviteResult', {
@@ -307,8 +312,8 @@ presenceNs.on('connection', s => {
     });
 });
 
-// ---- GAME CONNECTIONS ----
-io.on('connection', socket => {
+// ---- MULTIPLAYER CONNECTIONS ----
+io.on('connection', (socket) => {
     const mapName =
         socket.handshake.query &&
         socket.handshake.query.map === 'mini'
@@ -320,6 +325,7 @@ io.on('connection', socket => {
     console.log('Player connected to', mapName, socket.id);
 
     let lastChatAt = 0;
+
     socket.join(mapName);
 
     lobby.players[socket.id] = {
@@ -376,31 +382,33 @@ io.on('connection', socket => {
         socket.emit('requestPickupSpots');
     }
 
-    socket.on('pickupSpots', spots => {
+    socket.on('pickupSpots', (spots) => {
         if (
             lobby.pickupState ||
             !spots ||
             !Array.isArray(spots.weapons) ||
             !Array.isArray(spots.kits) ||
             !Array.isArray(spots.grenades)
-        ) return;
+        ) {
+            return;
+        }
 
         const clean = (list, prefix, extra) =>
-            list.slice(0, 8).map((item, i) =>
+            list.slice(0, 8).map((s, i) =>
                 Object.assign({
                     id: prefix + i,
-                    x: Number(item.x) || 0,
-                    z: Number(item.z) || 0,
+                    x: Number(s.x) || 0,
+                    z: Number(s.z) || 0,
                     active: true
-                }, extra(item))
+                }, extra(s))
             );
 
         lobby.pickupState = {
             weapons: clean(
                 spots.weapons,
                 'w',
-                item => ({
-                    type: item.type === 'sniper'
+                s => ({
+                    type: s.type === 'sniper'
                         ? 'sniper'
                         : 'shotgun'
                 })
@@ -415,7 +423,7 @@ io.on('connection', socket => {
         );
     });
 
-    socket.on('pickupTaken', d => {
+    socket.on('pickupTaken', (d) => {
         if (!lobby.pickupState || !d) return;
 
         const lists = {
@@ -425,9 +433,11 @@ io.on('connection', socket => {
         };
 
         const list = lists[d.kind];
+
         if (!list) return;
 
         const item = list.find(i => i.id === d.id);
+
         if (!item || !item.active) return;
 
         item.active = false;
@@ -447,19 +457,17 @@ io.on('connection', socket => {
         }, RESPAWN_MS[d.kind]);
     });
 
-    socket.on('mountVehicle', d => {
-        const vehicle = d && lobby.vehicles[d.id];
-        if (!vehicle) return;
+    socket.on('mountVehicle', (d) => {
+        const v = d && lobby.vehicles[d.id];
 
-        if (
-            vehicle.riderId &&
-            vehicle.riderId !== socket.id
-        ) {
+        if (!v) return;
+
+        if (v.riderId && v.riderId !== socket.id) {
             socket.emit('mountDenied', { id: d.id });
             return;
         }
 
-        vehicle.riderId = socket.id;
+        v.riderId = socket.id;
 
         io.to(mapName).emit('vehicleChanged', {
             id: d.id,
@@ -469,20 +477,20 @@ io.on('connection', socket => {
         });
     });
 
-    socket.on('dismountVehicle', d => {
-        const vehicle = d && lobby.vehicles[d.id];
+    socket.on('dismountVehicle', (d) => {
+        const v = d && lobby.vehicles[d.id];
 
-        if (!vehicle || vehicle.riderId !== socket.id) return;
+        if (!v || v.riderId !== socket.id) return;
 
-        vehicle.riderId = null;
-        vehicle.x = Number(d.x) || 0;
-        vehicle.z = Number(d.z) || 0;
+        v.riderId = null;
+        v.x = Number(d.x) || 0;
+        v.z = Number(d.z) || 0;
 
         io.to(mapName).emit('vehicleChanged', {
             id: d.id,
             riderId: null,
-            x: vehicle.x,
-            z: vehicle.z
+            x: v.x,
+            z: v.z
         });
     });
 
@@ -499,81 +507,80 @@ io.on('connection', socket => {
         }
     });
 
-    socket.on('setIdentity', data => {
-        const player = lobby.players[socket.id];
-        if (!player || !data) return;
+    socket.on('setIdentity', (data) => {
+        const p = lobby.players[socket.id];
 
-        player.name = String(
+        if (!p || !data) return;
+
+        p.name = String(
             data.name || 'Operative'
         ).slice(0, MAX_NAME_CHARS);
 
-        player.color = Number.isFinite(data.color)
+        p.color = Number.isFinite(data.color)
             ? data.color
             : 0x00ffcc;
 
-        player.visor = Number.isFinite(data.visor)
+        p.visor = Number.isFinite(data.visor)
             ? data.visor
-            : player.color;
+            : p.color;
 
-        player.helmet = [
-            'visor',
-            'full',
-            'scout'
-        ].includes(data.helmet) ? data.helmet : 'visor';
+        p.helmet = ['visor', 'full', 'scout'].includes(data.helmet)
+            ? data.helmet
+            : 'visor';
 
-        player.armor = [
-            'heavy',
-            'light',
-            'none'
-        ].includes(data.armor) ? data.armor : 'heavy';
+        p.armor = ['heavy', 'light', 'none'].includes(data.armor)
+            ? data.armor
+            : 'heavy';
 
         if (
             typeof data.emblem === 'string' &&
             data.emblem.startsWith('data:image/') &&
             data.emblem.length <= MAX_EMBLEM_CHARS
         ) {
-            player.emblem = data.emblem;
+            p.emblem = data.emblem;
         } else {
-            player.emblem = null;
+            p.emblem = null;
         }
 
         io.to(mapName).emit('playerIdentity', {
-            id: player.id,
-            name: player.name,
-            color: player.color,
-            visor: player.visor,
-            helmet: player.helmet,
-            armor: player.armor,
-            emblem: player.emblem
+            id: p.id,
+            name: p.name,
+            color: p.color,
+            visor: p.visor,
+            helmet: p.helmet,
+            armor: p.armor,
+            emblem: p.emblem
         });
     });
 
-    socket.on('playerMovement', data => {
+    socket.on('playerMovement', (data) => {
         if (!data || !lobby.players[socket.id]) return;
 
-        const player = lobby.players[socket.id];
+        const p = lobby.players[socket.id];
 
-        player.x = Number(data.x) || 0;
-        player.y = Number(data.y) || 0;
-        player.z = Number(data.z) || 0;
-        player.yaw = Number(data.yaw) || 0;
+        p.x = Number(data.x) || 0;
+        p.y = Number(data.y) || 0;
+        p.z = Number(data.z) || 0;
+        p.yaw = Number(data.yaw) || 0;
 
         socket.to(mapName).emit('playerMoved', {
             id: socket.id,
-            x: player.x,
-            y: player.y,
-            z: player.z,
-            yaw: player.yaw
+            x: p.x,
+            y: p.y,
+            z: p.z,
+            yaw: p.yaw
         });
     });
 
-    socket.on('chat', data => {
-        const player = lobby.players[socket.id];
-        if (!player || !data) return;
+    socket.on('chat', (data) => {
+        const p = lobby.players[socket.id];
+
+        if (!p || !data) return;
 
         const now = Date.now();
 
         if (now - lastChatAt < 700) return;
+
         lastChatAt = now;
 
         const text = String(data.text || '')
@@ -585,38 +592,78 @@ io.on('connection', socket => {
 
         io.to(mapName).emit('chat', {
             id: socket.id,
-            name: player.name,
+            name: p.name,
             text
         });
     });
 
-    socket.on('hitPlayer', hitData => {
+    // ---- STEALTH ATTACKS ----
+    socket.on('hitPlayer', (hitData) => {
         if (
             !hitData ||
             typeof hitData.targetId !== 'string'
-        ) return;
+        ) {
+            return;
+        }
 
         if (
             hitData.targetId === socket.id ||
             !lobby.players[hitData.targetId]
-        ) return;
+        ) {
+            return;
+        }
 
-        const damage = Math.min(
+        const targetId = hitData.targetId;
+        const weapon = String(
+            hitData.weapon || 'Unknown'
+        ).slice(0, 12);
+
+        // A firearm gets 100 damage if this target has not
+        // previously landed a hit on the attacker this match.
+        const isFirearm = [
+            'Rifle',
+            'Pistol',
+            'Shotgun',
+            'Sniper'
+        ].includes(weapon);
+
+        const targetHasHitAttacker =
+            lobby.damagePairs.has(`${targetId}->${socket.id}`);
+
+        const stealthAttack =
+            isFirearm && !targetHasHitAttacker;
+
+        const normalDamage = Math.min(
             100,
             Math.max(0, Number(hitData.damage) || 0)
         );
 
-        io.to(hitData.targetId).emit('playerHit', {
+        const damage = stealthAttack
+            ? 100
+            : normalDamage;
+
+        // Record that this attacker has hit this target.
+        lobby.damagePairs.add(`${socket.id}->${targetId}`);
+
+        io.to(targetId).emit('playerHit', {
             damage,
             attackerId: socket.id,
-            weapon: String(
-                hitData.weapon || 'Unknown'
-            ).slice(0, 12)
+            weapon,
+            stealthAttack
         });
+
+        if (stealthAttack) {
+            socket.emit('stealthAttackLanded', {
+                targetId,
+                targetName: lobby.players[targetId].name,
+                weapon
+            });
+        }
     });
 
-    socket.on('playerDied', data => {
+    socket.on('playerDied', (data) => {
         const victim = lobby.players[socket.id];
+
         if (!victim) return;
 
         const killer =
@@ -637,9 +684,10 @@ io.on('connection', socket => {
             victimName: victim.name,
             killerId: killer ? killer.id : null,
             killerName: killer ? killer.name : null,
-            weapon: data && data.weapon
-                ? String(data.weapon).slice(0, 12)
-                : 'Unknown'
+            weapon:
+                data && data.weapon
+                    ? String(data.weapon).slice(0, 12)
+                    : 'Unknown'
         });
     });
 
@@ -653,23 +701,32 @@ io.on('connection', socket => {
         const me = lobby.players[socket.id];
 
         VEHICLE_IDS.forEach(id => {
-            const vehicle = lobby.vehicles[id];
+            const v = lobby.vehicles[id];
 
-            if (vehicle.riderId !== socket.id) return;
+            if (v.riderId !== socket.id) return;
 
-            vehicle.riderId = null;
-            vehicle.x = me ? me.x : 0;
-            vehicle.z = me ? me.z : 0;
+            v.riderId = null;
+            v.x = me ? me.x : 0;
+            v.z = me ? me.z : 0;
 
             io.to(mapName).emit('vehicleChanged', {
                 id,
                 riderId: null,
-                x: vehicle.x,
-                z: vehicle.z
+                x: v.x,
+                z: v.z
             });
         });
 
         delete lobby.players[socket.id];
+
+        for (const pair of lobby.damagePairs) {
+            if (
+                pair.startsWith(`${socket.id}->`) ||
+                pair.endsWith(`->${socket.id}`)
+            ) {
+                lobby.damagePairs.delete(pair);
+            }
+        }
 
         io.to(mapName).emit(
             'playerDisconnected',
@@ -687,5 +744,5 @@ io.on('connection', socket => {
 const PORT = process.env.PORT || 3000;
 
 http.listen(PORT, () => {
-    console.log(`LITESHOT server running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
