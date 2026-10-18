@@ -3,66 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="liteshot-version" content="49">
-    <style>
-      html.liteshot-update-checking { background: #05070a; }
-      html.liteshot-update-checking body { visibility: hidden !important; }
-      #liteshot-update-notice {
-        position: fixed; inset: 0; z-index: 99999; display: flex; align-items: center;
-        justify-content: center; background: #05070a; color: #00ffcc;
-        font: bold 15px 'Courier New', monospace; letter-spacing: 2px;
-      }
-    </style>
-    <script>
-    (() => {
-      // This file is a complete playable fallback. Updates are checked once at startup.
-      const LITESHOT_VERSION = 49;
-      const UPDATE_BASE = 'https://liteshot-server.onrender.com/updates';
-      document.documentElement.classList.add('liteshot-update-checking');
-
-      async function fetchQuickly(url, timeoutMs) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-        try {
-          return await fetch(url, {
-            method: 'GET', cache: 'no-store', mode: 'cors', signal: controller.signal
-          });
-        } finally {
-          clearTimeout(timer);
-        }
-      }
-
-      (async () => {
-        try {
-          // Keep the check short so a sleeping or blocked server doesn't hold up the game.
-          const versionResponse = await fetchQuickly(UPDATE_BASE + '/version.json', 1800);
-          if (!versionResponse.ok) throw new Error('Update version check unavailable');
-          const info = await versionResponse.json();
-          const latestVersion = Number(info && info.version);
-
-          if (Number.isFinite(latestVersion) && latestVersion > LITESHOT_VERSION) {
-            const gameResponse = await fetchQuickly(UPDATE_BASE + '/latest.html', 5000);
-            if (!gameResponse.ok) throw new Error('Latest game download unavailable');
-            const latestHTML = await gameResponse.text();
-            // Verify the downloaded file is the version the server announced before loading it.
-            const expectedMarker = 'name="liteshot-version" content="' + latestVersion + '"';
-            if (!latestHTML.includes(expectedMarker) || !latestHTML.includes('LITESHOT')) {
-              throw new Error('Downloaded game version did not match the update manifest');
-            }
-            document.open();
-            document.write(latestHTML);
-            document.close();
-            return;
-          }
-        } catch (error) {
-          // Offline, blocked, or sleeping server: continue with the complete game saved in this file.
-          console.info('LITESHOT update check skipped; opening saved version.', error && error.message);
-        }
-        document.documentElement.classList.remove('liteshot-update-checking');
-      })();
-    })();
-    </script>
-    <title>LITESHOT49 - Full Featured Arena</title>
+    <title>LITESHOT - Full Featured Arena</title>
     
     <!-- Socket.io Library for Multiplayer -->
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
@@ -321,12 +262,14 @@
         <button class="play-btn" id="play-online" style="background:#00ffcc; color:#06121a;">PVP ONLINE</button>
         <button class="play-btn" id="play-offline" style="background:#ffcc00; color:#06121a;">BOTS</button>
         <button class="play-btn" id="play-challenge" style="background:#ff7a1a; color:#06121a;">CHALLENGE</button>
+        <button class="play-btn" id="play-wipeout" style="background:#33ff99; color:#06121a;">WIPEOUT</button>
         <button class="play-btn" id="play-back" style="background:#333; color:#fff;">BACK</button>
     </div>
     <div id="map-panel">
         <h2>CHOOSE A MAP</h2>
         <button class="play-btn" id="pick-og" style="background:#ffcc00; color:#06121a;">THE OG</button>
         <button class="play-btn" id="pick-mini" style="background:#ff7a1a; color:#06121a;">MINI MADNESS</button>
+        <button class="play-btn" id="pick-house" style="background:#ff3366; color:#06121a;">THE HOUSE</button>
         <button class="play-btn" id="map-back" style="background:#333; color:#fff;">BACK</button>
     </div>
     <div id="pending-panel">
@@ -356,7 +299,7 @@
     </div>
     <div id="blocker">
         <div id="instructions">
-            <h1>LITESHOT49</h1>
+            <h1>LITESHOT</h1>
             <p style="color: #888; margin-bottom: 15px; font-size: 12px;">ONLINE MULTIPLAYER ARENA</p>
             
             <div class="input-group">
@@ -404,7 +347,7 @@
     <script>
         const SERVER_URL = 'https://liteshot-server.onrender.com';
         // Which map to build: 'og' or 'mini'
-        const ACTIVE_MAP = localStorage.getItem('liteshotMap') === 'mini' ? 'mini' : 'og';
+        const ACTIVE_MAP = ['mini', 'house'].includes(localStorage.getItem('liteshotMap')) ? localStorage.getItem('liteshotMap') : 'og';
         const socket = (typeof io !== 'undefined')
             ? io(SERVER_URL, { autoConnect: false, query: { map: ACTIVE_MAP } })
             : { id: null, on() {}, emit() {}, connect() {} };
@@ -433,7 +376,7 @@
         document.getElementById('play-back').addEventListener('click', () => { playMenu.style.display = 'none'; });
 
         // ---- MAP PICKER: choose the map after the mode. Each map is its own online lobby. ----
-        const MAP_NAMES = { og: 'THE OG', mini: 'MINI MADNESS' };
+        const MAP_NAMES = { og: 'THE OG', mini: 'MINI MADNESS', house: 'THE HOUSE' };
         const mapPanel = document.getElementById('map-panel');
         const pendingPanel = document.getElementById('pending-panel');
         function openMapPicker(mode) {
@@ -451,6 +394,7 @@
             };
             document.getElementById('pick-og').onclick = () => pick('og');
             document.getElementById('pick-mini').onclick = () => pick('mini');
+            document.getElementById('pick-house').onclick = () => pick('house');
             document.getElementById('map-back').onclick = () => { mapPanel.style.display = 'none'; playMenu.style.display = 'flex'; };
         }
         // After a map switch: show the START button for the mode that was picked
@@ -461,7 +405,7 @@
         } catch (err) { /* ignore */ }
         if (pendingMode) {
             document.getElementById('pending-text').textContent =
-                'Loaded ' + MAP_NAMES[ACTIVE_MAP] + '. Press START to play ' + (pendingMode === 'online' ? 'PVP online' : pendingMode === 'challenge' ? 'challenge' : 'bots') + '.';
+                'Loaded ' + MAP_NAMES[ACTIVE_MAP] + '. Press START to play ' + (pendingMode === 'online' ? 'PVP online' : pendingMode === 'challenge' ? 'challenge' : pendingMode === 'wipeout' ? 'wipeout' : 'bots') + '.';
             pendingPanel.style.display = 'flex';
         }
         document.getElementById('pending-start').addEventListener('click', () => {
@@ -953,16 +897,17 @@
             const tex = new THREE.CanvasTexture(canvas);
             tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
             const mapType = (() => { try { return localStorage.getItem('liteshotMap'); } catch (e) { return 'og'; } })();
-            tex.repeat.set(mapType === 'mini' ? 15 : 60, mapType === 'mini' ? 15 : 60);
+            tex.repeat.set(mapType === 'mini' || mapType === 'house' ? 15 : 60, mapType === 'mini' || mapType === 'house' ? 15 : 60);
             return tex;
         }
 
         const savedMapForFloor = (() => { try { return localStorage.getItem('liteshotMap'); } catch (e) { return 'og'; } })();
-        const floorSize = savedMapForFloor === 'mini' ? 300 : 1200;
+        const floorSize = (savedMapForFloor === 'mini' || savedMapForFloor === 'house') ? 300 : 1200;
         const floorGeo = new THREE.PlaneGeometry(floorSize, floorSize);
         const floorMat = new THREE.MeshStandardMaterial({ map: createFloorTexture(), roughness: 0.9, metalness: 0.05 });
         const floor = new THREE.Mesh(floorGeo, floorMat);
         floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+        if (savedMapForFloor === 'house') floor.visible = false;
 
         const obstacles = [];
         const wallMat = new THREE.MeshStandardMaterial({ map: createBrickTexture(), roughness: 0.85, metalness: 0.05 });
@@ -985,8 +930,95 @@
             createObstacle(new THREE.BoxGeometry(wallThickness, height, depth), wallMat, rx - width / 2, height / 2, rz);
         }
 
+        // ---- THE HOUSE: three floors (basement, ground, first) from LITEHORROR's mansion generator, fixed seeds.
+        // '#' wall, '.' floor, '+' doorway. Each floor is a 25x19 grid of 3-unit cells. Ground floor is at y=0. ----
+        const HOUSE_CS = 3, HOUSE_GW = 25, HOUSE_GH = 19;
+        const HOUSE_STORY = 4.5, HOUSE_SLAB = 0.5, HOUSE_STEP = 0.625;
+        const HOUSE_LEVELS = {
+            B: { base: -5, rows: ["#########################", "##################.....##", "#....###.......###.....##", "#......+.......+.......##", "#....###.......#.#.....##", "#....######.####+#.....##", "#....######+####.###+####", "#....#......####.###.####", "#....#......####.###.####", "##.#.#......####.###.####", "##..+................####", "######.....##.......#####", "######.....##.......#####", "######..............#####", "#############.......#####", "#############.......#####", "#########################", "#########################", "#########################"] },
+            G: { base: 0, rows: ["#########################", "#....############.....###", "#...+...+......+......###", "#....############.....###", "##.#.############.....###", "##.#.####.....###.....###", "#.....###.....#####..####", "#....................####", "#.............##.......##", "##............+........##", "#########.....##.......##", "##.....##.....######+####", "##.....####..#######.####", "##.....####..#######.####", "##.....##.......###...###", "##.....+..............###", "#########.......###...###", "#########################", "#########################"] },
+            F: { base: 5, rows: ["#########################", "##...####################", "##...##...###############", "##...................####", "##...................####", "##...###.###.........####", "##..####.#######+########", "##.+####.#######.########", "##..#.......###...#######", "##...........+....#######", "##.##.......###...#######", "########.#######.########", "########+#######+########", "######.....##.......#####", "######.....+........#####", "######.....##.......#####", "#########################", "#########################", "#########################"] }
+        };
+        // Up: entry on the ground floor at row 1, steps at rows 2-9, landing on the first floor at row 10
+        const HOUSE_UP = { ci: 2, r0: 2 };
+        // Down: entry on the ground floor at row 1, steps at rows 2-9, landing in the basement at row 10
+        const HOUSE_DOWN = { ci: 4, r1: 2 };
+        const HOUSE_SPAWNS = [[12, 9], [21, 1], [2, 15], [21, 16], [7, 2]];
+        function houseOpen(level, i, j) {
+            if (i < 0 || j < 0 || i >= HOUSE_GW || j >= HOUSE_GH) return false;
+            return HOUSE_LEVELS[level].rows[j][i] !== '#';
+        }
+        // A stairwell opening: no floor slab here, the steps below it are the floor
+        function houseHole(level, i, j) {
+            if (level === 'F') return i === HOUSE_UP.ci && j >= HOUSE_UP.r0 && j <= HOUSE_UP.r0 + 7;
+            if (level === 'G' || level === 'B') return i === HOUSE_DOWN.ci && j >= HOUSE_DOWN.r1 && j <= HOUSE_DOWN.r1 + 7;
+            return false;
+        }
+        function houseUpSteps(i, j) { return i === HOUSE_UP.ci && j >= HOUSE_UP.r0 && j <= HOUSE_UP.r0 + 7; }
+        // Ground-floor cells where a player or bot can stand
+        function insideHouse(x, z) {
+            const i = Math.round(x / HOUSE_CS) + 12, j = Math.round(z / HOUSE_CS) + 9;
+            return houseOpen('G', i, j) && !houseHole('G', i, j) && !houseUpSteps(i, j);
+        }
+        // On THE HOUSE a jump stops at the first ceiling above the head (floor slabs and the roof)
+        function houseCeilingAbove(x, z, headY) {
+            let lowest = null;
+            for (const obs of obstacles) {
+                if (obs.isBot || obs.isPlayer || !obs.box) continue;
+                const b = obs.box;
+                if (b.min.y < headY - 0.05) continue;
+                if (x + playerRadius < b.min.x || x - playerRadius > b.max.x ||
+                    z + playerRadius < b.min.z || z - playerRadius > b.max.z) continue;
+                if (lowest === null || b.min.y < lowest) lowest = b.min.y;
+            }
+            return lowest;
+        }
+        function isHouseWall(level, i, j) {
+            if (houseOpen(level, i, j)) return false;
+            for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+                if (houseOpen(level, i + di, j + dj)) return true;
+            }
+            return false;
+        }
+        // Merges each horizontal run of cells into one box, so collision stays cheap
+        function buildHouseRuns(test, bottomY, height, mat) {
+            for (let j = 0; j < HOUSE_GH; j++) {
+                let i = 0;
+                while (i < HOUSE_GW) {
+                    if (!test(i, j)) { i++; continue; }
+                    let k = i;
+                    while (k + 1 < HOUSE_GW && test(k + 1, j)) k++;
+                    const cx = ((i + k) / 2 - 12) * HOUSE_CS, cz = (j - 9) * HOUSE_CS;
+                    createObstacle(new THREE.BoxGeometry((k - i + 1) * HOUSE_CS, height, HOUSE_CS), mat, cx, bottomY + height / 2, cz);
+                    i = k + 1;
+                }
+            }
+        }
+        function buildHouse() {
+            const slabMat = new THREE.MeshStandardMaterial({ color: 0x4a3626, roughness: 0.9 });
+            const stepMat = new THREE.MeshStandardMaterial({ color: 0x38271c, roughness: 1 });
+            const roofMat = new THREE.MeshStandardMaterial({ color: 0x1e1d1b, roughness: 1 });
+            for (const L of ['B', 'G', 'F']) {
+                const base = HOUSE_LEVELS[L].base;
+                // Floor slab: every open cell except the stairwell opening
+                buildHouseRuns((i, j) => !houseHole(L, i, j), base - HOUSE_SLAB, HOUSE_SLAB, slabMat);
+                // Walls: solid cells beside open cells, one storey tall
+                buildHouseRuns((i, j) => isHouseWall(L, i, j), base, HOUSE_STORY, wallMat);
+            }
+            // Roof over the top floor
+            buildHouseRuns(() => true, HOUSE_LEVELS.F.base + HOUSE_STORY, HOUSE_SLAB, roofMat);
+            // Stairs: walkable steps. Each step is one cell, climbing or dropping by HOUSE_STEP (under the step-up limit).
+            const cx = (i) => (i - 12) * HOUSE_CS, cz = (j) => (j - 9) * HOUSE_CS;
+            for (let k = 0; k < 8; k++) {
+                const up = (k + 1) * HOUSE_STEP;
+                createObstacle(new THREE.BoxGeometry(HOUSE_CS, up, HOUSE_CS), stepMat, cx(HOUSE_UP.ci), up / 2, cz(HOUSE_UP.r0 + k));
+                const down = -(k + 1) * HOUSE_STEP;
+                createObstacle(new THREE.BoxGeometry(HOUSE_CS, HOUSE_SLAB, HOUSE_CS), stepMat, cx(HOUSE_DOWN.ci), down - HOUSE_SLAB / 2, cz(HOUSE_DOWN.r1 + k));
+            }
+        }
+
         const STEP_H = 0.7;
-        const ARENA = ACTIVE_MAP === 'mini' ? 145 : 450;
+        const ARENA = ACTIVE_MAP === 'mini' ? 145 : ACTIVE_MAP === 'house' ? 50 : 450;
 
         if (ACTIVE_MAP === 'mini') {
             const wallThickness = 2;
@@ -1199,7 +1231,8 @@
         const RESERVED = [[-30, -30, 6], [30, -40, 6], [-40, 20, 6], [50, 40, 6],
                           [0, -18, 6], [-100, -118, 6], [100, -118, 6], [0, 50, 6]];
         function isFreeSpot(x, z, half) {
-            if (Math.hypot(x, z) < 20) return false;
+            if (ACTIVE_MAP === 'house') { if (!insideHouse(x, z)) return false; }
+            else if (Math.hypot(x, z) < 20) return false;
             for (const [rx, rz, rr] of RESERVED) {
                 if (Math.hypot(x - rx, z - rz) < rr) return false;
             }
@@ -1220,17 +1253,17 @@
         const spawnRingMat = new THREE.MeshBasicMaterial({ color: 0x9fb4c8, transparent: true, opacity: 0.35, side: THREE.DoubleSide });
 
         {
-            PAD_SPOTS = ACTIVE_MAP === 'mini' ? [[0, -10], [-42, -42], [42, -42], [0, 42]] : [[0, -18], [-100, -118], [100, -118], [0, 50]];
-            SPAWN_POINTS = [];
-            for (let k = 0; k < 5; k++) {
+            PAD_SPOTS = ACTIVE_MAP === 'house' ? [] : ACTIVE_MAP === 'mini' ? [[0, -10], [-42, -42], [42, -42], [0, 42]] : [[0, -18], [-100, -118], [100, -118], [0, 50]];
+            SPAWN_POINTS = ACTIVE_MAP === 'house' ? HOUSE_SPAWNS.map(([i, j]) => ({ x: (i - 12) * HOUSE_CS, z: (j - 9) * HOUSE_CS })) : [];
+            for (let k = 0; k < (ACTIVE_MAP === 'house' ? 0 : 5); k++) {
                 const a = (-90 + k * 72) * Math.PI / 180;
                 SPAWN_POINTS.push({ x: Math.cos(a) * (ACTIVE_MAP === 'mini' ? 38 : 120), z: Math.sin(a) * (ACTIVE_MAP === 'mini' ? 38 : 120) });
             }
-            const PORTAL_PAIRS = [
+            const PORTAL_PAIRS = ACTIVE_MAP === 'house' ? [] : [
                 { color: 0x00ffff, a: ACTIVE_MAP === 'mini' ? [-95, 55] : [-320, 200], b: ACTIVE_MAP === 'mini' ? [95, -55] : [320, -200] },
                 { color: 0xff33cc, a: ACTIVE_MAP === 'mini' ? [95, 55] : [320, 200], b: ACTIVE_MAP === 'mini' ? [-95, -55] : [-320, -200] }
             ];
-            SAFE_ZONES = SPAWN_POINTS.map(p => [p.x, p.z, 14])
+            SAFE_ZONES = SPAWN_POINTS.map(p => [p.x, p.z, ACTIVE_MAP === 'house' ? 3 : 14])
                 .concat(PORTAL_PAIRS.flatMap(pr => [[pr.a[0], pr.a[1], 10], [pr.b[0], pr.b[1], 10]]));
 
             SPAWN_POINTS.forEach(p => {
@@ -1259,9 +1292,11 @@
                 });
             });
 
+            if (ACTIVE_MAP === 'house') buildHouse(); else {
             createRoom(0, 0, ACTIVE_MAP === 'mini' ? 22 : 30, ACTIVE_MAP === 'mini' ? 22 : 30, 8);
             createRoom(ACTIVE_MAP === 'mini' ? -62 : -100, ACTIVE_MAP === 'mini' ? -62 : -100, ACTIVE_MAP === 'mini' ? 24 : 35, ACTIVE_MAP === 'mini' ? 24 : 35, 8);
             createRoom(ACTIVE_MAP === 'mini' ? 62 : 100, ACTIVE_MAP === 'mini' ? -62 : -100, ACTIVE_MAP === 'mini' ? 24 : 35, ACTIVE_MAP === 'mini' ? 24 : 35, 8);
+            }
 
             const barrelSpots = [];
             function addBarrel(x, z) {
@@ -1270,7 +1305,7 @@
                 obstacles.push({ mesh: null, box: new THREE.Box3(
                     new THREE.Vector3(x - 0.6, 0, z - 0.6), new THREE.Vector3(x + 0.6, 1.2, z + 0.6)) });
             }
-            for (let c = 0; c < 240; c++) {
+            for (let c = 0; c < (ACTIVE_MAP === 'house' ? 0 : 240); c++) {
                 const cx = (mapRand() - 0.5) * 2 * (ARENA - 20);
                 const cz = (mapRand() - 0.5) * 2 * (ARENA - 20);
                 const count = 3 + Math.floor(mapRand() * 4);
@@ -1299,7 +1334,7 @@
             }
 
             const lampPoles = [], lampHeads = [];
-            for (let x = -ARENA + 25; x < ARENA - 20; x += 48) {
+            for (let x = -ARENA + 25; x < (ACTIVE_MAP === 'house' ? -ARENA : ARENA - 20); x += 48) {
                 for (let z = -ARENA + 25; z < ARENA - 20; z += 48) {
                     const px = x + (mapRand() - 0.5) * 8, pz = z + (mapRand() - 0.5) * 8;
                     if (!isFreeSpot(px, pz, 0.5)) continue;
@@ -1320,7 +1355,7 @@
         // ---- RIDEABLES (every map): a flying scooter (no guns) and a fast pig (guns still work) ----
         const RIDE_TYPES = {
             scooter: { speed: 0.32, lift: 0.8, maxHeight: 18 },
-            pig: { speed: 0.3, lift: 1.5 }
+            pig: { speed: 0.375, lift: 1.5 }
         };
         const vehicles = [];
         let ride = null;        // the vehicle the player is riding, if any
@@ -1364,6 +1399,7 @@
         }
         // Places two scooters and two pigs on open ground. Its own random keeps the rest of the map unchanged.
         function buildRideables() {
+            if (ACTIVE_MAP === 'house') return;
             const rng = mulberry32(4242);
             const span = ARENA - 20;   // stay inside whichever map is loaded
             [{ type: 'scooter' }, { type: 'scooter' }, { type: 'pig' }, { type: 'pig' }].forEach(s => {
@@ -1376,7 +1412,7 @@
                 group.position.set(x, 0, z);
                 scene.add(group);
                 vehicles.push({ id: 'v' + vehicles.length, type: s.type, group: group, home: { x: x, z: z }, riderId: null,
-                                speed: RIDE_TYPES[s.type].speed, lift: RIDE_TYPES[s.type].lift, maxHeight: RIDE_TYPES[s.type].maxHeight });
+                                speed: RIDE_TYPES[s.type].speed, lift: RIDE_TYPES[s.type].lift, maxHeight: ACTIVE_MAP === 'house' ? 3 : RIDE_TYPES[s.type].maxHeight });
             });
         }
         function nearestRideable() {
@@ -1516,7 +1552,7 @@
                     onObjectiveEvent('botKill', { weapon: name });
                     despawnCharacter(bot.mesh, bot.meshCore);
                     kills++; updateHUD();
-                    setTimeout(() => { const sp = randomOpenSpot(); spawnBot(bot.isShooter, sp.x, sp.z); }, 4000);
+                    if (!wipeoutMode) setTimeout(() => { const sp = randomOpenSpot(); spawnBot(bot.isShooter, sp.x, sp.z, sp.y); }, 4000);
                 } else {
                     playSound('hit');
                     showHitMarker(false);
@@ -1584,7 +1620,7 @@
             pickupItems.length = 0;
             const add = (kind, s, type) => {
                 const mesh = createPickupMesh(kind, type);
-                mesh.position.set(s.x, 0.5, s.z);
+                mesh.position.set(s.x, (s.y || 0) + 0.5, s.z);
                 const item = { kind: kind, id: s.id, type: type, mesh: mesh, active: false };
                 pickupItems.push(item);
                 setPickupActive(item, s.active !== false);
@@ -1594,7 +1630,7 @@
             spots.grenades.forEach(g => add('grenade', g, null));
         }
         function randomPickupSpots() {
-            const spot = (id) => { const p = findClearSpot(); return { id: id, x: p.x, z: p.z }; };
+            const spot = (id) => { const p = findClearSpot(); return { id: id, x: p.x, z: p.z, y: p.y || 0 }; };
             return {
                 weapons: [Object.assign(spot('w0'), { type: 'shotgun' }), Object.assign(spot('w1'), { type: 'sniper' })],
                 kits: [spot('k0'), spot('k1'), spot('k2')],
@@ -1635,6 +1671,7 @@
                 if (!item.active) return;
                 item.mesh.rotation.y += 0.02;
                 if (Math.hypot(camera.position.x - item.mesh.position.x, camera.position.z - item.mesh.position.z) >= 2.2) return;
+                if (Math.abs((camera.position.y - eyeHeight) - (item.mesh.position.y - 0.5)) > 2.5) return;
                 if (item.kind === 'weapon') {
                     const slot = item.type === 'shotgun' ? 2 : 3;
                     inventory[slot] = makeWeapon(item.type);
@@ -1671,7 +1708,7 @@
         const objectiveEl = document.getElementById('objective-hud');
 
         function makeObjective() {
-            const kinds = ['kill', 'grenadeKill', 'weapon', 'portals', 'crates', 'heal'];
+            const kinds = portals.length ? ['kill', 'grenadeKill', 'weapon', 'portals', 'crates', 'heal'] : ['kill', 'grenadeKill', 'weapon', 'crates', 'heal'];
             let kind;
             do { kind = kinds[Math.floor(Math.random() * kinds.length)]; } while (kind === challenge.lastKind);
             challenge.lastKind = kind;
@@ -1866,7 +1903,7 @@
                     onObjectiveEvent('botKill', { weapon: 'Grenade' });
                     despawnCharacter(bot.mesh, bot.meshCore);
                     kills++; updateHUD();
-                    setTimeout(() => { const sp = randomOpenSpot(); spawnBot(bot.isShooter, sp.x, sp.z); }, 4000);
+                    if (!wipeoutMode) setTimeout(() => { const sp = randomOpenSpot(); spawnBot(bot.isShooter, sp.x, sp.z, sp.y); }, 4000);
                 }
             });
 
@@ -1955,7 +1992,7 @@
             return best || randomOpenSpot();
         }
 
-        function spawnBot(isShooter, x, z) {
+        function spawnBot(isShooter, x, z, y = 0) {
             const botGroup = new THREE.Group();
             const suitMat = new THREE.MeshStandardMaterial({ color: 0x1b2230, roughness: 0.4, metalness: 0.3 });
             const skinMat = new THREE.MeshStandardMaterial({ color: 0xd8b59b, roughness: 0.6 });
@@ -1965,7 +2002,7 @@
             const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.32, 0.3), skinMat);
             head.position.y = 1.55; botGroup.add(head);
 
-            botGroup.position.set(x, 0, z); scene.add(botGroup);
+            botGroup.position.set(x, y, z); scene.add(botGroup);
 
             const hitMesh = new THREE.Mesh(new THREE.BoxGeometry(0.7, 2.2, 0.7), new THREE.MeshBasicMaterial({ visible: false }));
             hitMesh.position.y = 1.1; botGroup.add(hitMesh);
@@ -1977,13 +2014,16 @@
         }
 
         function startBots() {
-            spawnBot(false, -30, -30);
-            spawnBot(false, 30, -40);
-            spawnBot(true, -40, 20);
-            spawnBot(true, 50, 40);
-            for (let i = 0; i < 4; i++) {
+            if (ACTIVE_MAP !== 'house') {
+                spawnBot(false, -30, -30);
+                spawnBot(false, 30, -40);
+                spawnBot(true, -40, 20);
+                spawnBot(true, 50, 40);
+            }
+            const count = ACTIVE_MAP === 'house' ? 8 : 4;
+            for (let i = 0; i < count; i++) {
                 const sp = randomOpenSpot();
-                spawnBot(i % 2 === 0, sp.x, sp.z);
+                spawnBot(i % 2 === 0, sp.x, sp.z, sp.y);
             }
         }
 
@@ -2004,6 +2044,7 @@
         }
 
         function randomOpenSpot() {
+            if (ACTIVE_MAP === 'house') return houseRandomSpot();
             const R = ARENA - 15;
             let p, tries = 0;
             do {
@@ -2016,7 +2057,135 @@
         let playerHealth = 100;
         let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, isSprinting = false;
         let pitch = 0, yaw = 0; const mouseSensitivity = 0.002;
+
         let verticalVelocity = 0; const gravity = 0.007;
+        // ---- MOMENTUM, SLIDING, WALL JUMP, MELEE (on foot) ----
+        let pvx = 0, pvz = 0;            // on-foot horizontal velocity (carries through the air)
+        let slideFrames = 0;             // frames left in a slide
+        let wallJumpCount = 0, lastWallKey = '';
+        let meleeReadyAt = 0, meleeSwingStart = -1e9;
+        const meleeMesh = new THREE.Group();
+        const meleeBlade = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.42),
+            new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.6, roughness: 0.3 }));
+        meleeBlade.position.set(0, 0, -0.2);
+        meleeMesh.add(meleeBlade);
+        meleeMesh.position.set(0.3, -0.25, -0.5);
+        meleeMesh.visible = false;
+        camera.add(meleeMesh);
+
+        function isGrounded() {
+            const feet = camera.position.y - eyeHeight;
+            return feet <= getFloorHeight(camera.position.x, camera.position.z, feet) + 0.12;
+        }
+
+        // Momentum: on the ground you accelerate and stop quickly; in the air you keep most of your speed.
+        function updateOnFootMomentum(inX, inZ, hasInput) {
+            const grounded = isGrounded();
+            if (slideFrames > 0) {
+                slideFrames--;
+                pvx *= 0.972; pvz *= 0.972;
+                if (Math.hypot(pvx, pvz) < 0.05) slideFrames = 0;
+                return;
+            }
+            if (hasInput) {
+                const maxSp = crouching ? 0.06 : (isSprinting ? 0.22 : 0.12);
+                const accel = grounded ? 0.2 : 0.035;
+                pvx += (inX * maxSp - pvx) * accel;
+                pvz += (inZ * maxSp - pvz) * accel;
+            } else {
+                const f = grounded ? 0.8 : 0.985;
+                pvx *= f; pvz *= f;
+                if (Math.abs(pvx) < 0.001) pvx = 0;
+                if (Math.abs(pvz) < 0.001) pvz = 0;
+            }
+        }
+
+        // Sliding: crouch while moving fast on the ground to slide along with your momentum.
+        function tryStartSlide() {
+            if (ride || !gameStarted || isDead || matchOver) return;
+            const hasInput = moveForward || moveBackward || moveLeft || moveRight;
+            const speed = Math.hypot(pvx, pvz);
+            if (!hasInput || speed < 0.15 || slideFrames > 0 || !isGrounded()) return;
+            const k = 0.42 / speed;
+            pvx *= k; pvz *= k;
+            slideFrames = 42;
+        }
+
+        // Wall jumping: in the air, next to a wall, jump to kick off it.
+        function getWallNormal() {
+            const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+            const d = playerRadius + 0.15;
+            for (const [dx, dz] of dirs) {
+                if (checkCollision(camera.position.x + dx * d, camera.position.z + dz * d)) return { x: -dx, z: -dz };
+            }
+            return null;
+        }
+        function tryWallJump() {
+            if (ACTIVE_MAP === 'house' || wallJumpCount >= 3) return;
+            const n = getWallNormal();
+            if (!n) return;
+            const key = n.x.toFixed(1) + ',' + n.z.toFixed(1);
+            if (key === lastWallKey) return;
+            lastWallKey = key;
+            wallJumpCount++;
+            let vx = pvx * 0.6, vz = pvz * 0.6;
+            const into = vx * n.x + vz * n.z;
+            if (into < 0) { vx -= n.x * into; vz -= n.z * into; }
+            pvx = n.x * 0.2 + vx;
+            pvz = n.z * 0.2 + vz;
+            verticalVelocity = 0.3;
+        }
+
+        // Melee: a quick close-range hit in front of you. Works with any weapon, or none.
+        function inMeleeArc(eye, dir, target) {
+            const v = target.clone().sub(eye);
+            if (v.length() > 2.6) return false;
+            return v.normalize().dot(dir) > 0.6;
+        }
+        function doMelee() {
+            if (!gameStarted || isDead || matchOver || chatOpen || (ride && ride.type === 'scooter')) return;
+            if (document.pointerLockElement !== document.body) return;
+            const now = performance.now();
+            if (now < meleeReadyAt) return;
+            meleeReadyAt = now + 450;
+            meleeSwingStart = now;
+            meleeMesh.visible = true;
+
+            const dir = new THREE.Vector3();
+            camera.getWorldDirection(dir);
+            const eye = camera.position.clone();
+            let hit = false;
+            bots.forEach(bot => {
+                if (hit || bot.health <= 0) return;
+                const p = new THREE.Vector3(bot.mesh.position.x, bot.mesh.position.y + 1.1, bot.mesh.position.z);
+                if (!inMeleeArc(eye, dir, p)) return;
+                hit = true;
+                bot.health -= 40;
+                playSound('hit');
+                showHitMarker(false);
+                if (bot.health <= 0) {
+                    playSound('kill');
+                    addKillfeedEntry(localPlayerName, bot.name, 'Melee');
+                    showHitMarker(true);
+                    onObjectiveEvent('botKill', { weapon: 'Melee' });
+                    despawnCharacter(bot.mesh, bot.meshCore);
+                    kills++; updateHUD();
+                    if (!wipeoutMode) setTimeout(() => { const sp = randomOpenSpot(); spawnBot(bot.isShooter, sp.x, sp.z, sp.y); }, 4000);
+                }
+            });
+            if (!hit) {
+                Object.keys(remotePlayers).forEach(id => {
+                    if (hit || remotePlayers[id].dead) return;
+                    const rp = remotePlayers[id];
+                    const p = new THREE.Vector3(rp.mesh.position.x, rp.mesh.position.y + 1.1, rp.mesh.position.z);
+                    if (!inMeleeArc(eye, dir, p)) return;
+                    hit = true;
+                    netEmit('hitPlayer', { targetId: id, damage: 40, weapon: 'Melee' });
+                    playSound('hit');
+                    showHitMarker(false);
+                });
+            }
+        }
 
         const WEAPON_TYPES = {
             rifle: { 
@@ -2079,7 +2248,7 @@
                 if (p.rot) partMesh.rotation.set(...p.rot);
                 weaponGroup.add(partMesh);
             });
-            
+
             camera.add(weaponGroup);
             currentWeaponMesh = weaponGroup;
         }
@@ -2108,10 +2277,7 @@
             isReloading = true;
             playSound('reload');
 
-            if (currentWeaponMesh) {
-                currentWeaponMesh.position.y = -0.5;
-                currentWeaponMesh.rotation.x = -0.4;
-            }
+            reloadStartedAt = performance.now();
 
             setTimeout(() => {
                 const needed = w.maxAmmo - w.ammo;
@@ -2126,6 +2292,140 @@
                 isReloading = false;
                 updateHUD();
             }, 1000);
+        }
+
+        // ---- RELOAD ANIMATION ----
+        const RELOAD_MS = 1000;
+        let reloadStartedAt = 0;
+        // Plays the reload: gun tips down, magazine drops out and a new one goes in, then the bolt/pump cycles.
+        function updateReloadPose() {
+            const gun = currentWeaponMesh;
+            if (!gun) return;
+            const seg = (a, b, t) => Math.min(1, Math.max(0, (t - a) / (b - a)));
+            const t = isReloading ? Math.min(1, (performance.now() - reloadStartedAt) / RELOAD_MS) : 0;
+            const tilt = isReloading ? -0.45 * seg(0, 0.2, t) * (1 - seg(0.8, 1, t)) : 0;
+            const magDrop = isReloading ? seg(0.2, 0.4, t) - seg(0.6, 0.8, t) : 0;
+            const cycle = isReloading ? seg(0.82, 0.88, t) - seg(0.92, 1, t) : 0;
+            gun.rotation.x = tilt;
+            for (const m of gun.children) {
+                const tag = m.userData.tag;
+                if (tag === 'mag') m.position.y = m.userData.baseY - 0.9 * magDrop;
+                else if (tag === 'bolt') m.position.z = m.userData.baseZ + 0.12 * cycle;
+            }
+        }
+
+        // A random open cell on a random floor of THE HOUSE, with that floor's height
+        function houseRandomSpot() {
+            for (let t = 0; t < 400; t++) {
+                const r = Math.random();
+                const L = r < 0.5 ? 'G' : r < 0.75 ? 'F' : 'B';
+                const i = Math.floor(Math.random() * HOUSE_GW), j = Math.floor(Math.random() * HOUSE_GH);
+                if (!houseOpen(L, i, j) || houseHole(L, i, j)) continue;
+                if (L === 'G' && houseUpSteps(i, j)) continue;
+                return { x: (i - 12) * HOUSE_CS, z: (j - 9) * HOUSE_CS, y: HOUSE_LEVELS[L].base };
+            }
+            return { x: 0, z: 0, y: 0 };
+        }
+
+        // Grenades bounce off walls, floors and slabs, and stop at ceilings
+        function grenadeBlocked(x, y, z) {
+            for (const o of obstacles) {
+                if (o.isBot || o.isPlayer || !o.box) continue;
+                const b = o.box;
+                if (y < b.min.y || y > b.max.y) continue;
+                if (x < b.min.x - 0.25 || x > b.max.x + 0.25 || z < b.min.z - 0.25 || z > b.max.z + 0.25) continue;
+                return true;
+            }
+            return false;
+        }
+        function stepGrenade(g) {
+            const p = g.mesh.position, v = g.velocity, R = 0.25;
+            let nx = p.x + v.x, nz = p.z + v.z;
+            if (grenadeBlocked(nx, p.y, p.z)) { v.x *= -0.4; nx = p.x; }
+            if (grenadeBlocked(p.x, p.y, nz)) { v.z *= -0.4; nz = p.z; }
+            p.x = nx; p.z = nz;
+            v.y -= gravity * 0.5;
+            let ny = p.y + v.y;
+            const floorY = getFloorHeight(p.x, p.z, p.y);
+            if (ny - R <= floorY) {
+                ny = floorY + R;
+                if (v.y < 0) v.y = -v.y * 0.35;
+                if (Math.abs(v.y) < 0.01) v.y = 0;
+                v.x *= 0.8; v.z *= 0.8;
+            }
+            if (ACTIVE_MAP === 'house' && v.y > 0) {
+                const ceil = houseCeilingAbove(p.x, p.z, p.y);
+                if (ceil !== null && ny + R > ceil) { v.y = 0; ny = ceil - R; }
+            }
+            p.y = ny;
+        }
+
+        // ---- WIPEOUT: survive waves of bots that get bigger and tougher, Horde / Firefight style ----
+        let wipeoutMode = false;
+        const wipeout = { phase: 'break', wave: 0, queue: 0, nextAt: 0, lastSpawn: 0, failed: false };
+        const wipeoutEl = document.createElement('div');
+        wipeoutEl.style.cssText = 'position:fixed;left:50%;top:70px;transform:translateX(-50%);color:#33ff99;font:bold 16px monospace;letter-spacing:2px;text-shadow:0 0 8px #000;display:none;pointer-events:none;z-index:6;text-align:center;';
+        document.body.appendChild(wipeoutEl);
+        function wipeoutBest() {
+            try { return +(localStorage.getItem('liteshotWipeoutBest') || 0); } catch (e) { return 0; }
+        }
+        function wipeoutStart() {
+            wipeout.phase = 'break'; wipeout.wave = 0; wipeout.queue = 0; wipeout.failed = false;
+            wipeout.nextAt = performance.now() + 4000;
+            showAnnouncement('WIPEOUT: HOLD THE LINE');
+        }
+        function wipeoutSpawnSpot() {
+            for (let t = 0; t < 40; t++) {
+                const sp = randomOpenSpot();
+                if (Math.hypot(sp.x - camera.position.x, sp.z - camera.position.z) >= 18) return sp;
+            }
+            return randomOpenSpot();
+        }
+        function wipeoutStartWave() {
+            wipeout.wave++;
+            wipeout.phase = 'fight';
+            wipeout.queue = Math.min(24, 3 + wipeout.wave * 2);
+            wipeout.lastSpawn = 0;
+            showAnnouncement('WAVE ' + wipeout.wave);
+            if (wipeout.wave > wipeoutBest()) {
+                try { localStorage.setItem('liteshotWipeoutBest', String(wipeout.wave)); } catch (e) { /* ignore */ }
+            }
+        }
+        function updateWipeout() {
+            if (!wipeoutMode || !gameStarted || matchOver) { wipeoutEl.style.display = 'none'; return; }
+            wipeoutEl.style.display = 'block';
+            const now = performance.now();
+            if (isDead) { wipeout.failed = true; wipeoutEl.innerText = 'DOWN'; return; }
+            if (wipeout.failed) {
+                // You died: clear the field and start again from wave 1
+                bots.forEach(b => { if (b.health > 0) { b.health = 0; despawnCharacter(b.mesh, b.meshCore); } });
+                wipeout.failed = false; wipeout.wave = 0; wipeout.queue = 0; wipeout.phase = 'break';
+                wipeout.nextAt = now + 5000;
+                showAnnouncement('OVERRUN: BACK TO WAVE 1 (BEST ' + wipeoutBest() + ')');
+            }
+            const alive = bots.filter(b => b.health > 0).length;
+            if (wipeout.phase === 'break') {
+                const secs = Math.ceil(Math.max(0, wipeout.nextAt - now) / 1000);
+                wipeoutEl.innerText = wipeout.wave === 0 ? 'WAVE 1 IN ' + secs : 'WAVE ' + wipeout.wave + ' CLEARED · NEXT IN ' + secs;
+                if (now >= wipeout.nextAt) wipeoutStartWave();
+                return;
+            }
+            if (wipeout.queue > 0 && now - wipeout.lastSpawn > 900) {
+                const sp = wipeoutSpawnSpot();
+                const shooterChance = Math.min(0.7, 0.2 + wipeout.wave * 0.08);
+                spawnBot(Math.random() < shooterChance, sp.x, sp.z, sp.y);
+                bots[bots.length - 1].health = 100 + wipeout.wave * 10;
+                wipeout.queue--; wipeout.lastSpawn = now;
+            }
+            wipeoutEl.innerText = 'WAVE ' + wipeout.wave + ' · ' + (alive + wipeout.queue) + ' LEFT';
+            if (wipeout.queue === 0 && alive === 0) {
+                // Wave cleared: refill health, grenades and magazines before the next wave
+                wipeout.phase = 'break'; wipeout.nextAt = now + 10000;
+                playerHealth = 100; grenadeCount = 3;
+                inventory.forEach(w => { if (w) w.ammo = w.maxAmmo; });
+                updateHUD();
+                showAnnouncement('WAVE ' + wipeout.wave + ' CLEARED');
+            }
         }
 
         let matchEndsAt = 0;
@@ -2289,11 +2589,12 @@
 
             gameMode = mode === 'online' ? 'online' : 'offline';
             challengeMode = mode === 'challenge';
+            wipeoutMode = mode === 'wipeout';
             initAudio();
             if (mode === 'online') {
                 socket.connect();
                 } else {
-                startBots();
+                if (wipeoutMode) wipeoutStart(); else startBots();
                 buildPickups(randomPickupSpots());
                 if (challengeMode) {
                     challenge.completed = 0;
@@ -2302,11 +2603,13 @@
                 }
                 updateObjectiveHud();
             }
+            updateHUD();
             document.body.requestPointerLock();
         }
         playOnlineBtn.addEventListener('click', () => openMapPicker('online'));
         playOfflineBtn.addEventListener('click', () => openMapPicker('offline'));
         document.getElementById('play-challenge').addEventListener('click', () => openMapPicker('challenge'));
+        document.getElementById('play-wipeout').addEventListener('click', () => openMapPicker('wipeout'));
 
         document.addEventListener('pointerlockchange', () => {
             if (document.pointerLockElement === document.body) {
@@ -2339,13 +2642,13 @@
             forward: 'KeyW', back: 'KeyS', left: 'KeyA', right: 'KeyD',
             jump: 'Space', sprint: 'ShiftLeft', reload: 'KeyR', grenade: 'KeyG',
             scoreboard: 'Tab', pause: 'KeyP', cycle: 'KeyQ', crouch: 'ControlLeft', chat: 'KeyT', mount: 'KeyE',
-            slot1: 'Digit1', slot2: 'Digit2', slot3: 'Digit3', slot4: 'Digit4'
+            slot1: 'Digit1', slot2: 'Digit2', slot3: 'Digit3', slot4: 'Digit4', melee: 'KeyF'
         };
         const KEY_LABELS = {
             forward: 'Move forward', back: 'Move back', left: 'Move left', right: 'Move right',
             jump: 'Jump', sprint: 'Sprint', reload: 'Reload', grenade: 'Grenade',
             scoreboard: 'Leaderboard', pause: 'Pause', cycle: 'Next weapon', crouch: 'Crouch', chat: 'Chat', mount: 'Ride',
-            slot1: 'Weapon 1', slot2: 'Weapon 2', slot3: 'Weapon 3', slot4: 'Weapon 4'
+            slot1: 'Weapon 1', slot2: 'Weapon 2', slot3: 'Weapon 3', slot4: 'Weapon 4', melee: 'Melee'
         };
         const KEYS = Object.assign({}, DEFAULT_KEYS);
         try {
@@ -2365,7 +2668,7 @@
         function renderControlsText() {
             const k = (a) => `<kbd>${keyLabel(KEYS[a])}</kbd>`;
             document.getElementById('controls-text').innerHTML =
-                `${k('forward')}${k('left')}${k('back')}${k('right')} - Move | ${k('jump')} - Jump | ${k('sprint')} - Sprint | ${k('crouch')} - Crouch | ${k('mount')} - Ride<br>` +
+                `${k('forward')}${k('left')}${k('back')}${k('right')} - Move | ${k('jump')} - Jump | ${k('sprint')} - Sprint | ${k('crouch')} - Crouch | ${k('mount')} - Ride | ${k('melee')} - Melee<br>` +
                 `<kbd>Mouse</kbd> - Look | <kbd>Left Click</kbd> - Fire | <kbd>Right Click</kbd> - Scope<br>` +
                 `${k('reload')} - Reload | ${k('grenade')} - Grenade | ${k('scoreboard')} - Leaderboard | ${k('pause')} - Pause<br>` +
                 `${k('slot1')}-${k('slot4')} - Weapons | ${k('cycle')} - Next weapon<br>` +
@@ -2448,6 +2751,7 @@
             else if (e.code === KEYS.back) moveBackward = true;
             else if (e.code === KEYS.left) moveLeft = true;
             else if (e.code === KEYS.right) moveRight = true;
+            else if (e.code === KEYS.melee) { if (!e.repeat) doMelee(); }
             else if (e.code === KEYS.sprint) { if (SETTINGS.toggleSprint) { if (!e.repeat) isSprinting = !isSprinting; } else isSprinting = true; }
             else if (e.code === KEYS.reload) { if (!(ride && ride.type === 'scooter')) reloadWeapon(); }
             else if (e.code === KEYS.grenade) { if (!(ride && ride.type === 'scooter')) throwGrenade(); }
@@ -2471,7 +2775,7 @@
                     updateHUD();
                 }
             }
-            else if (e.code === KEYS.crouch) { if (SETTINGS.toggleCrouch) { if (!e.repeat) crouching = !crouching; } else crouching = true; }
+            else if (e.code === KEYS.crouch) { if (SETTINGS.toggleCrouch) { if (!e.repeat) crouching = !crouching; } else crouching = true; if (!e.repeat) tryStartSlide(); }
             else if (e.code === KEYS.scoreboard) {
                 e.preventDefault();
                 document.getElementById('tab-leaderboard').style.display = 'block';
@@ -2482,7 +2786,8 @@
                 else {
                     const feet = camera.position.y - eyeHeight;
                     const lift = ride ? ride.lift : 0;
-                    if (feet <= getFloorHeight(camera.position.x, camera.position.z, feet) + lift + 0.1) verticalVelocity = 0.34;
+                    if (feet <= getFloorHeight(camera.position.x, camera.position.z, feet) + lift + 0.1) verticalVelocity = (ride && ride.type === 'pig') ? 0.34 * 1.15 : (ACTIVE_MAP === 'house' ? 0.24 : 0.34);
+                    else if (!ride) tryWallJump();
                 }
             }
         });
@@ -2625,7 +2930,7 @@
         }
 
         function getFloorHeight(x, z, feetY) {
-            let floorY = 0;
+            let floorY = ACTIVE_MAP === 'house' ? -999 : 0;
             for (const obs of obstacles) {
                 if (obs.isBot) continue;
                 if (obs.isPlayer) {
@@ -2673,6 +2978,12 @@
             updatePickups();
             checkPortals();
             updateCrouch();
+            updateReloadPose();
+            {
+                const swingT = performance.now() - meleeSwingStart;
+                if (swingT < 300) { meleeMesh.visible = true; meleeMesh.rotation.z = Math.sin(swingT / 300 * Math.PI) * -1.1; }
+                else meleeMesh.visible = false;
+            }
 
             if (currentWeaponMesh && currentWeaponMesh.position.z < 0 && !isReloading) {
                 currentWeaponMesh.position.z += 0.02;
@@ -2699,7 +3010,7 @@
                             onObjectiveEvent('botKill', { weapon: b.weaponName });
                             despawnCharacter(bot.mesh, bot.meshCore);
                             kills++; updateHUD();
-                            setTimeout(() => { const sp = randomOpenSpot(); spawnBot(bot.isShooter, sp.x, sp.z); }, 4000);
+                            if (!wipeoutMode) setTimeout(() => { const sp = randomOpenSpot(); spawnBot(bot.isShooter, sp.x, sp.z, sp.y); }, 4000);
                         }
                     }
                 });
@@ -2732,13 +3043,7 @@
 
             for (let i = activeGrenades.length - 1; i >= 0; i--) {
                 const g = activeGrenades[i];
-                g.mesh.position.add(g.velocity);
-                g.velocity.y -= gravity * 0.5;
-
-                if (g.mesh.position.y <= 0.1) {
-                    g.mesh.position.y = 0.1;
-                    g.velocity.set(0, 0, 0);
-                }
+                stepGrenade(g);
 
                 g.life--;
                 if (g.life <= 0) {
@@ -2799,29 +3104,38 @@
             updateRideSpeed();
             const canSteer = document.pointerLockElement === document.body && !chatOpen;
             let moveX = 0, moveZ = 0;
-            if (canSteer) {
-                const forwardVector = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-                forwardVector.y = 0; forwardVector.normalize();
-                const rightVector = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-                rightVector.y = 0; rightVector.normalize();
-
-                const currentSpeed = ride ? (ride.curSpeed || 0) : (crouching ? 0.06 : (isSprinting ? 0.22 : 0.12));
-                if (moveForward) { moveX += forwardVector.x * currentSpeed; moveZ += forwardVector.z * currentSpeed; }
-                if (moveBackward) { moveX -= forwardVector.x * currentSpeed; moveZ -= forwardVector.z * currentSpeed; }
-                if (moveLeft) { moveX -= rightVector.x * currentSpeed; moveZ -= rightVector.z * currentSpeed; }
-                if (moveRight) { moveX += rightVector.x * currentSpeed; moveZ += rightVector.z * currentSpeed; }
-                carryX = moveX; carryZ = moveZ;
-            } else {
-                carryX *= 0.93; carryZ *= 0.93;
-                moveX = carryX; moveZ = carryZ;
+            {
+                const fwdV = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                fwdV.y = 0; fwdV.normalize();
+                const rightV = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                rightV.y = 0; rightV.normalize();
+                let inX = 0, inZ = 0;
+                if (canSteer) {
+                    if (moveForward) { inX += fwdV.x; inZ += fwdV.z; }
+                    if (moveBackward) { inX -= fwdV.x; inZ -= fwdV.z; }
+                    if (moveLeft) { inX -= rightV.x; inZ -= rightV.z; }
+                    if (moveRight) { inX += rightV.x; inZ += rightV.z; }
+                    const len = Math.hypot(inX, inZ);
+                    if (len > 0) { inX /= len; inZ /= len; }
+                }
+                const hasInput = canSteer && (moveForward || moveBackward || moveLeft || moveRight);
+                if (ride) {
+                    pvx = 0; pvz = 0; slideFrames = 0;
+                    const s = ride.curSpeed || 0;
+                    moveX = inX * s; moveZ = inZ * s;
+                    carryX = moveX; carryZ = moveZ;
+                } else {
+                    updateOnFootMomentum(inX, inZ, hasInput);
+                    moveX = pvx; moveZ = pvz;
+                }
             }
 
             if (!checkCollision(camera.position.x + moveX, camera.position.z)) {
                 camera.position.x += moveX;
-            }
+            } else if (!ride) { pvx = 0; }
             if (!checkCollision(camera.position.x, camera.position.z + moveZ)) {
                 camera.position.z += moveZ;
-            }
+            } else if (!ride) { pvz = 0; }
 
             if (ride && ride.type === 'scooter') {
                 // The scooter flies: Space rises, Ctrl (crouch) drops
@@ -2831,12 +3145,16 @@
                 if (camera.position.y - eyeHeight > ride.maxHeight) camera.position.y = ride.maxHeight + eyeHeight;
             } else {
                 verticalVelocity -= gravity;
+                if (ACTIVE_MAP === 'house' && verticalVelocity > 0) {
+                    const ceil = houseCeilingAbove(camera.position.x, camera.position.z, camera.position.y);
+                    if (ceil !== null && camera.position.y + verticalVelocity > ceil - 0.05) verticalVelocity = 0;
+                }
                 camera.position.y += verticalVelocity;
             }
             const floorY = getFloorHeight(camera.position.x, camera.position.z, camera.position.y - eyeHeight) + (ride ? ride.lift : 0);
             if (camera.position.y - eyeHeight < floorY) {
                 camera.position.y = floorY + eyeHeight;
-                verticalVelocity = 0;
+                verticalVelocity = 0; wallJumpCount = 0; lastWallKey = '';
             }
 
             for (const id in remotePlayers) {
@@ -2847,6 +3165,7 @@
             }
             updateRideables();
             vehicleRam();
+            updateWipeout();
             updateCoords();
             renderRide();
         }
