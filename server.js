@@ -1,12 +1,11 @@
-
 const express = require('express');
 const app = express();
 const path = require('path');
 const http = require('http').createServer(app);
 
-// ---- LITESHOT web updater: Version 51 ----
+// ---- LITESHOT web updater: Version 63 ----
 // Keep LITESHOT_latest.html beside this file in the Render deployment.
-const GAME_VERSION = 51;
+const GAME_VERSION = 63;
 const LATEST_GAME_FILE = path.join(__dirname, 'LITESHOT_latest.html');
 
 function setUpdateHeaders(res, contentType) {
@@ -87,8 +86,24 @@ function newLobby() {
 
 const lobbies = {
     og: newLobby(),
-    mini: newLobby()
+    mini: newLobby(),
+    house: newLobby()
 };
+
+const MAP_IDS = ['og', 'mini', 'house'];
+
+function cleanMap(value) {
+    return MAP_IDS.includes(value) ? value : 'og';
+}
+
+// Ground-floor spawn points for THE HOUSE (matches the game's layout)
+const HOUSE_SPAWN_POINTS = [
+    { x: 0, z: 0 },
+    { x: 27, z: -24 },
+    { x: -30, z: 18 },
+    { x: 27, z: 21 },
+    { x: -15, z: -21 }
+];
 
 function scoreList(lobby) {
     return Object.values(lobby.players)
@@ -188,7 +203,7 @@ presenceNs.on('connection', (s) => {
             d.name || previous.name || 'Operative'
         ).trim().slice(0, MAX_NAME_CHARS) || 'Operative';
 
-        const map = d.map === 'mini' ? 'mini' : 'og';
+        const map = cleanMap(d.map);
 
         knownProfiles[code] = { code, name, map };
 
@@ -248,7 +263,7 @@ presenceNs.on('connection', (s) => {
 
         presenceCodes[myCode].inOnline = !!(d && d.online);
 
-        if (d && (d.map === 'mini' || d.map === 'og')) {
+        if (d && MAP_IDS.includes(d.map)) {
             presenceCodes[myCode].map = d.map;
         }
 
@@ -308,11 +323,9 @@ presenceNs.on('connection', (s) => {
 
 // ---- Multiplayer ----
 io.on('connection', (socket) => {
-    const mapName =
-        socket.handshake.query &&
-        socket.handshake.query.map === 'mini'
-            ? 'mini'
-            : 'og';
+    const mapName = cleanMap(
+        socket.handshake.query && socket.handshake.query.map
+    );
 
     const lobby = lobbies[mapName];
 
@@ -321,11 +334,15 @@ io.on('connection', (socket) => {
     let lastChatAt = 0;
     socket.join(mapName);
 
+    const start = mapName === 'house'
+        ? HOUSE_SPAWN_POINTS[Math.floor(Math.random() * HOUSE_SPAWN_POINTS.length)]
+        : { x: (Math.random() - 0.5) * 40, z: (Math.random() - 0.5) * 40 };
+
     lobby.players[socket.id] = {
         id: socket.id,
-        x: (Math.random() - 0.5) * 40,
+        x: start.x,
         y: 2.2,
-        z: (Math.random() - 0.5) * 40,
+        z: start.z,
         yaw: 0,
         name: 'Operative',
         color: 0x00ffcc,
@@ -391,6 +408,7 @@ io.on('connection', (socket) => {
                 Object.assign({
                     id: prefix + i,
                     x: Number(item.x) || 0,
+                    y: Number(item.y) || 0,
                     z: Number(item.z) || 0,
                     active: true
                 }, extra(item))
