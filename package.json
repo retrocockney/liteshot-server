@@ -1,16 +1,17 @@
-{
-  "name": "liteshot-server",
-  "version": "1.1.0",
-  "description": "LiteShot multiplayer server",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.7.2"
+function vehiclePayload(v) {
+  const out = { id: v.id, riderId: v.riderId };
+  if (typeof v.x === "number" && typeof v.z === "number") {
+    out.x = v.x;
+    out.z = v.z;
+  }
+  return out;
+}
+
+function releaseVehicleOf(mapName, room, socketId) {
+  for (const v of room.vehicles.values()) {
+    if (v.riderId === socketId) {
+      v.riderId = null;
+      io.to(mapName).emit("vehicleChanged", vehiclePayload(v));
+    }
   }
 }
