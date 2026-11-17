@@ -1,21 +1,18 @@
+"use strict";
+
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 
-const app = express();
-const server = http.createServer(app);
+// ---------- config ----------
 
-const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 1e6,
-  pingTimeout: 30000
-});
-
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const MAP_IDS = ["og", "mini", "house"];
+const CUSTOM_ID_RE = /^custom-[a-f0-9]{8}$/;
 const MAX_CUSTOM_MAP_OBJECTS = 3000;
 const MAX_CUSTOM_MAP_BYTES = 750000;
 const MAX_PLAYERS_PER_ROOM = 64;
+const MAX_PICKUP_SPOTS = 300;
 
 const MATCH_MS = 5 * 60 * 1000;
 const MATCH_BREAK_MS = 10 * 1000;
@@ -23,10 +20,25 @@ const MAX_HP = 100;
 const RESPAWN_MS = 2500;
 const PICKUP_RESPAWN_MS = 20 * 1000;
 
+// ---------- state ----------
+
 // mapName -> { players, vehicles, pickups, takenPickups, match }
 const rooms = new Map();
 // customRoomId -> { hostSocketId, level, publishedAt }
 const customMapRooms = new Map();
+
+// ---------- app setup ----------
+
+const app = express();
+app.set("trust proxy", 1); // Render sits behind a proxy
+const server = http.createServer(app);
+
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  maxHttpBufferSize: 1e6,
+  pingTimeout: 30000,
+  pingInterval: 25000
+});
 
 // ---------- helpers ----------
 
@@ -40,9 +52,15 @@ function num(value, fallback = 0) {
 }
 
 function cleanMap(value) {
-  if (MAP_IDS.includes(value)) return value;
-  if (typeof value === "string" && /^custom-[a-f0-9]{8}$/.test(value)) return value;
+  if (typeof value === "string") {
+    if (MAP_IDS.includes(value)) return value;
+    if (CUSTOM_ID_RE.test(value)) return value;
+  }
   return "og";
+}
+
+function isCustom(mapName) {
+  return mapName.startsWith("custom-");
 }
 
 function cleanName(value) {
@@ -56,16 +74,18 @@ function cleanColor(value) {
 }
 
 function getRoom(mapName) {
-  if (!rooms.has(mapName)) {
-    rooms.set(mapName, {
+  let room = rooms.get(mapName);
+  if (!room) {
+    room = {
       players: new Map(),
       vehicles: new Map(),
       pickups: null,
       takenPickups: new Map(),
       match: null
-    });
+    };
+    rooms.set(mapName, room);
   }
-  return rooms.get(mapName);
+  return room;
 }
 
 function newPlayer(id, mapName) {
@@ -113,6 +133,7 @@ function publicPlayer(p) {
   };
 }
 
+// Returns { mapName, room, me } for a connected, registered socket, or null.
 function ctxOf(socket) {
   const mapName = socket.data.mapName;
   const room = rooms.get(mapName);
@@ -120,8 +141,28 @@ function ctxOf(socket) {
   return room && me ? { mapName, room, me } : null;
 }
 
+// Wrap a handler so an exception in one event never takes the server down.
+function safe(name, fn) {
+  return (...args) => {
+    try {
+      fn(...args);
+    } catch (err) {
+      console.error(`Handler "${name}" failed:`, err);
+    }
+  };
+}
+
 function pickupKey(kind, id) {
   return `${String(kind)}|${String(id)}`;
+}
+
+function releaseVehicleOf(mapName, room, socketId) {
+  for (const v of room.vehicles.values()) {
+    if (v.riderId === socketId) {
+      v.riderId = null;
+      io.to(mapName).emit("vehicleChanged", { ...v });
+    }
+  }
 }
 
 // ---------- match ----------
@@ -132,7 +173,8 @@ function startMatch(mapName) {
 
   room.match = {
     endsAt: Date.now() + MATCH_MS,
-    timer: setTimeout(() => endMatch(mapName), MATCH_MS)
+    timer: setTimeout(() => endMatch(mapName), MATCH_MS),
+    breakTimer: null
   };
   io.to(mapName).emit("matchStart", { msRemaining: MATCH_MS });
 }
@@ -157,22 +199,28 @@ function endMatch(mapName) {
     p.alive = true;
   }
 
-  setTimeout(() => {
+  // Break between matches, then start the next one if anyone is still here.
+  const breakTimer = setTimeout(() => {
     const current = rooms.get(mapName);
-    if (current && current.players.size > 0) startMatch(mapName);
+    if (current && current.players.size > 0 && !current.match) {
+      startMatch(mapName);
+    }
   }, MATCH_BREAK_MS);
+  room.breakTimer = breakTimer;
+}
+
+function stopRoomTimers(room) {
+  if (room.match) {
+    clearTimeout(room.match.timer);
+    room.match = null;
+  }
+  if (room.breakTimer) {
+    clearTimeout(room.breakTimer);
+    room.breakTimer = null;
+  }
 }
 
 // ---------- combat ----------
-
-function releaseVehicleOf(mapName, room, socketId) {
-  for (const v of room.vehicles.values()) {
-    if (v.riderId === socketId) {
-      v.riderId = null;
-      io.to(mapName).emit("vehicleChanged", { ...v });
-    }
-  }
-}
 
 function killPlayer(mapName, room, victim, killer, weapon) {
   victim.alive = false;
@@ -210,17 +258,24 @@ function safeLevel(level) {
     return null;
   }
 
+  const objects = [];
+  for (const o of level.objects) {
+    if (!o || typeof o !== "object") continue;
+    const vehicle = o.vehicle == null ? null : Math.max(0, Math.min(2, num(o.vehicle)));
+    objects.push({
+      x: num(o.x),
+      z: num(o.z),
+      type: Math.max(0, Math.min(5, num(o.type))),
+      color: cleanColor(o.color ?? 0x4488ff),
+      vehicle,
+      rotation: num(o.rotation)
+    });
+  }
+
   const result = {
     name: String(level.name || "Custom Level").slice(0, 80),
-    arenaSize: Math.max(60, Math.min(1200, Number(level.arenaSize) || 300)),
-    objects: level.objects.map((object) => ({
-      x: num(object?.x),
-      z: num(object?.z),
-      type: Math.max(0, Math.min(5, Number(object?.type) || 0)),
-      color: Number.isFinite(Number(object?.color)) ? Number(object.color) >>> 0 : 0x4488ff,
-      vehicle: object?.vehicle == null ? null : Math.max(0, Math.min(2, Number(object.vehicle) || 0)),
-      rotation: num(object?.rotation)
-    }))
+    arenaSize: Math.max(60, Math.min(1200, num(level.arenaSize, 300))),
+    objects
   };
 
   const bytes = Buffer.byteLength(JSON.stringify(result), "utf8");
@@ -261,9 +316,8 @@ io.on("connection", (socket) => {
   socket.join(mapName);
   room.players.set(socket.id, newPlayer(socket.id, mapName));
 
-  // Custom map delivery
   function sendCustomMap() {
-    if (!mapName.startsWith("custom-")) return;
+    if (!isCustom(mapName)) return;
     const published = customMapRooms.get(mapName);
     if (published) {
       socket.emit("customMapData", { roomId: mapName, level: published.level });
@@ -273,15 +327,15 @@ io.on("connection", (socket) => {
   }
   sendCustomMap();
 
-  socket.on("requestCustomMap", (data) => {
+  socket.on("requestCustomMap", safe("requestCustomMap", (data) => {
     const roomId = obj(data).roomId || mapName;
-    if (roomId !== mapName || !roomId.startsWith("custom-")) return;
+    if (roomId !== mapName || !isCustom(roomId)) return;
     sendCustomMap();
-  });
+  }));
 
-  socket.on("hostCustomMap", (data) => {
+  socket.on("hostCustomMap", safe("hostCustomMap", (data) => {
     const d = obj(data);
-    if (!mapName.startsWith("custom-") || d.roomId !== mapName) return;
+    if (!isCustom(mapName) || d.roomId !== mapName) return;
 
     const level = safeLevel(d.level);
     if (!level) {
@@ -298,13 +352,13 @@ io.on("connection", (socket) => {
     customMapRooms.set(mapName, { hostSocketId: socket.id, level, publishedAt: Date.now() });
     socket.emit("customMapHostAck", { roomId: mapName });
     socket.to(mapName).emit("customMapData", { roomId: mapName, level });
-  });
+  }));
 
-  // Identity: first call announces the player to the room
-  socket.on("setIdentity", (data) => {
+  // First call announces the player to the room; later calls update identity.
+  socket.on("setIdentity", safe("setIdentity", (data) => {
     const ctx = ctxOf(socket);
     if (!ctx) return;
-    const { room, me } = ctx;
+    const { room: r, me } = ctx;
     const d = obj(data);
 
     Object.assign(me, {
@@ -321,26 +375,26 @@ io.on("connection", (socket) => {
       me.announced = true;
 
       const others = {};
-      for (const [id, p] of room.players) {
+      for (const [id, p] of r.players) {
         if (id !== socket.id) others[id] = publicPlayer(p);
       }
       socket.emit("currentPlayers", others);
       socket.to(mapName).emit("newPlayer", publicPlayer(me));
 
-      socket.emit("vehicleStates", [...room.vehicles.values()]);
+      socket.emit("vehicleStates", [...r.vehicles.values()]);
 
-      if (room.pickups) {
-        socket.emit("pickupState", room.pickups);
-        for (const t of room.takenPickups.values()) {
+      if (r.pickups) {
+        socket.emit("pickupState", r.pickups);
+        for (const t of r.takenPickups.values()) {
           socket.emit("pickupTaken", { kind: t.kind, id: t.id });
         }
       } else {
         socket.emit("requestPickupSpots");
       }
 
-      if (room.match) {
+      if (r.match) {
         socket.emit("matchStart", {
-          msRemaining: Math.max(0, room.match.endsAt - Date.now())
+          msRemaining: Math.max(0, r.match.endsAt - Date.now())
         });
       } else {
         startMatch(mapName);
@@ -348,9 +402,9 @@ io.on("connection", (socket) => {
     } else {
       io.to(mapName).emit("playerIdentity", publicPlayer(me));
     }
-  });
+  }));
 
-  socket.on("playerMovement", (data) => {
+  socket.on("playerMovement", safe("playerMovement", (data) => {
     const ctx = ctxOf(socket);
     if (!ctx) return;
     const d = obj(data);
@@ -368,15 +422,15 @@ io.on("connection", (socket) => {
       z: me.z,
       yaw: me.yaw
     });
-  });
+  }));
 
-  socket.on("hitPlayer", (data) => {
+  socket.on("hitPlayer", safe("hitPlayer", (data) => {
     const ctx = ctxOf(socket);
     if (!ctx) return;
     const d = obj(data);
-    const { room, me } = ctx;
+    const { room: r, me } = ctx;
 
-    const target = room.players.get(String(d.targetId));
+    const target = r.players.get(String(d.targetId));
     if (!target || target.id === me.id || !target.alive || !me.alive) return;
 
     const damage = Math.max(0, Math.min(MAX_HP, num(d.damage)));
@@ -387,19 +441,18 @@ io.on("connection", (socket) => {
     target.hp = Math.max(0, target.hp - damage);
     io.to(target.id).emit("playerHit", { damage, attackerId: me.id, weapon });
 
-    if (target.hp <= 0) killPlayer(mapName, room, target, me, weapon);
-  });
+    if (target.hp <= 0) killPlayer(mapName, r, target, me, weapon);
+  }));
 
-  // Client reports its own death; the server already decides deaths in hitPlayer,
-  // so this is ignored to prevent spoofed kills.
+  // Deaths are decided server-side in hitPlayer; client reports are ignored.
   socket.on("playerDied", () => {});
 
-  socket.on("restartMatch", () => {
+  socket.on("restartMatch", safe("restartMatch", () => {
     if (!ctxOf(socket)) return;
     startMatch(mapName);
-  });
+  }));
 
-  socket.on("chat", (data) => {
+  socket.on("chat", safe("chat", (data) => {
     const ctx = ctxOf(socket);
     if (!ctx) return;
 
@@ -415,19 +468,21 @@ io.on("connection", (socket) => {
       text,
       time: Date.now()
     });
-  });
+  }));
 
-  // Pickups: the first player in a room supplies the spot list
-  socket.on("pickupSpots", (spots) => {
+  // First player in a room supplies the pickup spot list.
+  socket.on("pickupSpots", safe("pickupSpots", (spots) => {
     const ctx = ctxOf(socket);
     if (!ctx || ctx.room.pickups || !Array.isArray(spots)) return;
 
-    ctx.room.pickups = spots.filter((s) => s && typeof s === "object").slice(0, 300);
+    ctx.room.pickups = spots
+      .filter((s) => s && typeof s === "object")
+      .slice(0, MAX_PICKUP_SPOTS);
     ctx.room.takenPickups.clear();
     io.to(mapName).emit("pickupState", ctx.room.pickups);
-  });
+  }));
 
-  socket.on("pickupTaken", (data) => {
+  socket.on("pickupTaken", safe("pickupTaken", (data) => {
     const ctx = ctxOf(socket);
     if (!ctx || !ctx.room.pickups) return;
 
@@ -442,31 +497,31 @@ io.on("connection", (socket) => {
     const key = pickupKey(d.kind, d.id);
     if (ctx.room.takenPickups.has(key)) return;
 
-    const room = ctx.room;
-    room.takenPickups.set(key, { kind: d.kind, id: d.id });
+    const r = ctx.room;
+    r.takenPickups.set(key, { kind: d.kind, id: d.id });
     socket.to(mapName).emit("pickupTaken", { kind: d.kind, id: d.id });
 
     setTimeout(() => {
-      if (rooms.get(mapName) !== room) return;
-      room.takenPickups.delete(key);
+      if (rooms.get(mapName) !== r) return;
+      r.takenPickups.delete(key);
       io.to(mapName).emit("pickupRespawn", { kind: d.kind, id: d.id });
     }, PICKUP_RESPAWN_MS);
-  });
+  }));
 
-  // Vehicles: one rider per vehicle
-  socket.on("mountVehicle", (data) => {
+  // One rider per vehicle.
+  socket.on("mountVehicle", safe("mountVehicle", (data) => {
     const ctx = ctxOf(socket);
     if (!ctx) return;
-    const { room, me } = ctx;
+    const { room: r, me } = ctx;
 
     const rawId = obj(data).id;
     if (rawId == null) return;
     const key = String(rawId);
 
-    let v = room.vehicles.get(key);
+    let v = r.vehicles.get(key);
     if (!v) {
       v = { id: rawId, riderId: null, x: 0, z: 0 };
-      room.vehicles.set(key, v);
+      r.vehicles.set(key, v);
     }
 
     if (v.riderId && v.riderId !== socket.id) {
@@ -474,19 +529,19 @@ io.on("connection", (socket) => {
       return;
     }
 
-    releaseVehicleOf(mapName, room, socket.id);
+    releaseVehicleOf(mapName, r, socket.id);
     v.riderId = socket.id;
     me.vehicleId = key;
     io.to(mapName).emit("vehicleChanged", { ...v });
-  });
+  }));
 
-  socket.on("dismountVehicle", (data) => {
+  socket.on("dismountVehicle", safe("dismountVehicle", (data) => {
     const ctx = ctxOf(socket);
     if (!ctx) return;
-    const { room } = ctx;
+    const { room: r } = ctx;
     const d = obj(data);
 
-    const v = room.vehicles.get(String(d.id));
+    const v = r.vehicles.get(String(d.id));
     if (!v || v.riderId !== socket.id) return;
 
     v.riderId = null;
@@ -494,47 +549,72 @@ io.on("connection", (socket) => {
     v.z = num(d.z, v.z);
     ctx.me.vehicleId = null;
     io.to(mapName).emit("vehicleChanged", { ...v });
-  });
+  }));
 
   socket.on("disconnect", () => {
-    const room = rooms.get(mapName);
+    try {
+      const r = rooms.get(mapName);
 
-    if (room) {
-      const me = room.players.get(socket.id);
-      if (me) clearTimeout(me.respawnTimer);
+      if (r) {
+        const me = r.players.get(socket.id);
+        if (me) clearTimeout(me.respawnTimer);
 
-      releaseVehicleOf(mapName, room, socket.id);
-      room.players.delete(socket.id);
+        releaseVehicleOf(mapName, r, socket.id);
+        r.players.delete(socket.id);
 
-      socket.to(mapName).emit("playerDisconnected", socket.id);
+        socket.to(mapName).emit("playerDisconnected", socket.id);
 
-      if (room.players.size === 0) {
-        if (room.match) clearTimeout(room.match.timer);
-        room.match = null;
+        if (r.players.size === 0) {
+          stopRoomTimers(r);
 
-        if (MAP_IDS.includes(mapName)) {
-          // Fixed maps persist, but reset their shared state
-          room.pickups = null;
-          room.takenPickups.clear();
-          room.vehicles.clear();
-        } else {
-          rooms.delete(mapName);
+          if (MAP_IDS.includes(mapName)) {
+            // Fixed maps persist, but reset their shared state.
+            r.pickups = null;
+            r.takenPickups.clear();
+            r.vehicles.clear();
+          } else {
+            rooms.delete(mapName);
+          }
         }
       }
-    }
 
-    if (mapName.startsWith("custom-")) {
-      const published = customMapRooms.get(mapName);
-      if (published && published.hostSocketId === socket.id) {
-        customMapRooms.delete(mapName);
-        socket.to(mapName).emit("customMapMissing", { roomId: mapName });
+      if (isCustom(mapName)) {
+        const published = customMapRooms.get(mapName);
+        if (published && published.hostSocketId === socket.id) {
+          customMapRooms.delete(mapName);
+          socket.to(mapName).emit("customMapMissing", { roomId: mapName });
+        }
       }
-    }
 
-    console.log("Player disconnected:", socket.id, "from", mapName);
+      console.log("Player disconnected:", socket.id, "from", mapName);
+    } catch (err) {
+      console.error("Disconnect cleanup failed:", err);
+    }
   });
 });
 
+// ---------- startup and shutdown ----------
+
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`LiteShot server listening on port ${PORT}`);
+});
+
+function shutdown(signal) {
+  console.log(`${signal} received, shutting down`);
+  for (const room of rooms.values()) stopRoomTimers(room);
+  io.close(() => {
+    server.close(() => process.exit(0));
+  });
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled rejection:", err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
 });
