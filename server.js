@@ -22,15 +22,14 @@ const PICKUP_RESPAWN_MS = 20 * 1000;
 
 // ---------- state ----------
 
-// mapName -> { players, vehicles, pickups, takenPickups, match }
 const rooms = new Map();
-// customRoomId -> { hostSocketId, level, publishedAt }
 const customMapRooms = new Map();
 
 // ---------- app setup ----------
 
 const app = express();
-app.set("trust proxy", 1); // Render sits behind a proxy
+app.set("trust proxy", 1);
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
@@ -49,6 +48,14 @@ function obj(value) {
 function num(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function cleanMode(value) {
+  return value === "1v1" || value === "2v2" ? value : "ffa";
+}
+
+function roomKeyFor(mapName, mode) {
+  return `${mapName}::${mode}`;
 }
 
 function cleanMap(value) {
@@ -73,25 +80,31 @@ function cleanColor(value) {
   return Number.isFinite(color) ? color >>> 0 : 0x00ffcc;
 }
 
-function getRoom(mapName) {
+function getRoom(mapName, mode = "ffa") {
   let room = rooms.get(mapName);
+
   if (!room) {
     room = {
       players: new Map(),
+      mode,
+      capacity: mode === "1v1" ? 2 : mode === "2v2" ? 4 : MAX_PLAYERS_PER_ROOM,
       vehicles: new Map(),
       pickups: null,
       takenPickups: new Map(),
       match: null
     };
+
     rooms.set(mapName, room);
   }
+
   return room;
 }
 
-function newPlayer(id, mapName) {
+function newPlayer(id, mapName, team = 0) {
   return {
     id,
     map: mapName,
+    team,
     name: "Player",
     color: 0x00ffcc,
     visor: null,
@@ -122,6 +135,7 @@ function publicPlayer(p) {
     armor: p.armor,
     emblem: p.emblem,
     map: p.map,
+    team: p.team,
     x: p.x,
     y: p.y,
     z: p.z,
@@ -133,15 +147,14 @@ function publicPlayer(p) {
   };
 }
 
-// Returns { mapName, room, me } for a connected, registered socket, or null.
 function ctxOf(socket) {
   const mapName = socket.data.mapName;
   const room = rooms.get(mapName);
   const me = room && room.players.get(socket.id);
+
   return room && me ? { mapName, room, me } : null;
 }
 
-// Wrap a handler so an exception in one event never takes the server down.
 function safe(name, fn) {
   return (...args) => {
     try {
@@ -169,28 +182,62 @@ function releaseVehicleOf(mapName, room, socketId) {
 
 function startMatch(mapName) {
   const room = rooms.get(mapName);
+
   if (!room || room.match) return;
+
+  if (room.mode !== "ffa" && room.players.size < room.capacity) {
+    io.to(mapName).emit("matchWaiting", {
+      mode: room.mode,
+      needed: room.capacity,
+      players: room.players.size
+    });
+
+    return;
+  }
 
   room.match = {
     endsAt: Date.now() + MATCH_MS,
     timer: setTimeout(() => endMatch(mapName), MATCH_MS),
     breakTimer: null
   };
-  io.to(mapName).emit("matchStart", { msRemaining: MATCH_MS });
+
+  io.to(mapName).emit("matchStart", {
+    msRemaining: MATCH_MS
+  });
 }
 
 function endMatch(mapName) {
   const room = rooms.get(mapName);
+
   if (!room || !room.match) return;
 
   clearTimeout(room.match.timer);
   room.match = null;
 
   const scores = [...room.players.values()]
-    .map((p) => ({ id: p.id, name: p.name, kills: p.kills, deaths: p.deaths }))
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      kills: p.kills,
+      deaths: p.deaths
+    }))
     .sort((a, b) => b.kills - a.kills);
 
-  io.to(mapName).emit("matchEnd", { scores });
+  const teamScores =
+    room.mode === "2v2" || room.mode === "1v1"
+      ? [1, 2].map(team => ({
+          team,
+          kills: [...room.players.values()]
+            .filter(p => p.team === team)
+            .reduce((sum, p) => sum + p.kills, 0)
+        }))
+      : [];
+
+  io.to(mapName).emit("matchEnd", {
+    scores,
+    mode: room.mode,
+    teamScores
+  });
 
   for (const p of room.players.values()) {
     p.kills = 0;
@@ -199,13 +246,14 @@ function endMatch(mapName) {
     p.alive = true;
   }
 
-  // Break between matches, then start the next one if anyone is still here.
   const breakTimer = setTimeout(() => {
     const current = rooms.get(mapName);
+
     if (current && current.players.size > 0 && !current.match) {
       startMatch(mapName);
     }
   }, MATCH_BREAK_MS);
+
   room.breakTimer = breakTimer;
 }
 
@@ -214,6 +262,7 @@ function stopRoomTimers(room) {
     clearTimeout(room.match.timer);
     room.match = null;
   }
+
   if (room.breakTimer) {
     clearTimeout(room.breakTimer);
     room.breakTimer = null;
@@ -239,6 +288,7 @@ function killPlayer(mapName, room, victim, killer, weapon) {
   });
 
   clearTimeout(victim.respawnTimer);
+
   victim.respawnTimer = setTimeout(() => {
     victim.alive = true;
     victim.hp = MAX_HP;
@@ -259,9 +309,15 @@ function safeLevel(level) {
   }
 
   const objects = [];
+
   for (const o of level.objects) {
     if (!o || typeof o !== "object") continue;
-    const vehicle = o.vehicle == null ? null : Math.max(0, Math.min(2, num(o.vehicle)));
+
+    const vehicle =
+      o.vehicle == null
+        ? null
+        : Math.max(0, Math.min(2, num(o.vehicle)));
+
     objects.push({
       x: num(o.x),
       z: num(o.z),
@@ -279,6 +335,7 @@ function safeLevel(level) {
   };
 
   const bytes = Buffer.byteLength(JSON.stringify(result), "utf8");
+
   return bytes <= MAX_CUSTOM_MAP_BYTES ? result : null;
 }
 
@@ -301,63 +358,124 @@ app.get("/health", (req, res) => {
 // ---------- sockets ----------
 
 io.on("connection", (socket) => {
-  const mapName = cleanMap(socket.handshake.query?.map);
+  const baseMapName = cleanMap(socket.handshake.query?.map);
+  const mode = cleanMode(socket.handshake.query?.mode);
+  const mapName = roomKeyFor(baseMapName, mode);
 
   const existing = rooms.get(mapName);
-  if (existing && existing.players.size >= MAX_PLAYERS_PER_ROOM) {
-    socket.emit("serverFull", { map: mapName });
+
+  const capacity =
+    mode === "1v1" ? 2 :
+    mode === "2v2" ? 4 :
+    MAX_PLAYERS_PER_ROOM;
+
+  if (existing && existing.players.size >= capacity) {
+    socket.emit("serverFull", {
+      map: baseMapName,
+      mode
+    });
+
     socket.disconnect(true);
     return;
   }
 
-  const room = getRoom(mapName);
+  const room = getRoom(mapName, mode);
+
+  const team =
+    mode === "1v1" || mode === "2v2"
+      ? (
+          [...room.players.values()].filter(p => p.team === 1).length <=
+          [...room.players.values()].filter(p => p.team === 2).length
+            ? 1
+            : 2
+        )
+      : 0;
+
   socket.data.mapName = mapName;
+  socket.data.baseMapName = baseMapName;
+  socket.data.mode = mode;
   socket.data.playerName = "Player";
+
   socket.join(mapName);
-  room.players.set(socket.id, newPlayer(socket.id, mapName));
+
+  room.players.set(
+    socket.id,
+    newPlayer(socket.id, baseMapName, team)
+  );
 
   function sendCustomMap() {
-    if (!isCustom(mapName)) return;
-    const published = customMapRooms.get(mapName);
+    if (!isCustom(baseMapName)) return;
+
+    const published = customMapRooms.get(baseMapName);
+
     if (published) {
-      socket.emit("customMapData", { roomId: mapName, level: published.level });
+      socket.emit("customMapData", {
+        roomId: baseMapName,
+        level: published.level
+      });
     } else {
-      socket.emit("customMapMissing", { roomId: mapName });
+      socket.emit("customMapMissing", {
+        roomId: baseMapName
+      });
     }
   }
+
   sendCustomMap();
 
   socket.on("requestCustomMap", safe("requestCustomMap", (data) => {
-    const roomId = obj(data).roomId || mapName;
-    if (roomId !== mapName || !isCustom(roomId)) return;
+    const roomId = obj(data).roomId || baseMapName;
+
+    if (roomId !== baseMapName || !isCustom(roomId)) return;
+
     sendCustomMap();
   }));
 
   socket.on("hostCustomMap", safe("hostCustomMap", (data) => {
     const d = obj(data);
-    if (!isCustom(mapName) || d.roomId !== mapName) return;
+
+    if (!isCustom(baseMapName) || d.roomId !== baseMapName) return;
 
     const level = safeLevel(d.level);
+
     if (!level) {
-      socket.emit("customMapHostError", { reason: "Invalid map or map exceeds the size limit." });
+      socket.emit("customMapHostError", {
+        reason: "Invalid map or map exceeds the size limit."
+      });
+
       return;
     }
 
-    const current = customMapRooms.get(mapName);
+    const current = customMapRooms.get(baseMapName);
+
     if (current && current.hostSocketId !== socket.id) {
-      socket.emit("customMapHostError", { reason: "Another player is hosting this map." });
+      socket.emit("customMapHostError", {
+        reason: "Another player is hosting this map."
+      });
+
       return;
     }
 
-    customMapRooms.set(mapName, { hostSocketId: socket.id, level, publishedAt: Date.now() });
-    socket.emit("customMapHostAck", { roomId: mapName });
-    socket.to(mapName).emit("customMapData", { roomId: mapName, level });
+    customMapRooms.set(baseMapName, {
+      hostSocketId: socket.id,
+      level,
+      publishedAt: Date.now()
+    });
+
+    socket.emit("customMapHostAck", {
+      roomId: baseMapName
+    });
+
+    socket.to(mapName).emit("customMapData", {
+      roomId: baseMapName,
+      level
+    });
   }));
 
-  // First call announces the player to the room; later calls update identity.
   socket.on("setIdentity", safe("setIdentity", (data) => {
     const ctx = ctxOf(socket);
+
     if (!ctx) return;
+
     const { room: r, me } = ctx;
     const d = obj(data);
 
@@ -369,24 +487,34 @@ io.on("connection", (socket) => {
       armor: d.armor ?? null,
       emblem: d.emblem ?? null
     });
+
     socket.data.playerName = me.name;
 
     if (!me.announced) {
       me.announced = true;
 
       const others = {};
+
       for (const [id, p] of r.players) {
-        if (id !== socket.id) others[id] = publicPlayer(p);
+        if (id !== socket.id) {
+          others[id] = publicPlayer(p);
+        }
       }
+
       socket.emit("currentPlayers", others);
+
       socket.to(mapName).emit("newPlayer", publicPlayer(me));
 
       socket.emit("vehicleStates", [...r.vehicles.values()]);
 
       if (r.pickups) {
         socket.emit("pickupState", r.pickups);
+
         for (const t of r.takenPickups.values()) {
-          socket.emit("pickupTaken", { kind: t.kind, id: t.id });
+          socket.emit("pickupTaken", {
+            kind: t.kind,
+            id: t.id
+          });
         }
       } else {
         socket.emit("requestPickupSpots");
@@ -397,7 +525,15 @@ io.on("connection", (socket) => {
           msRemaining: Math.max(0, r.match.endsAt - Date.now())
         });
       } else {
-        startMatch(mapName);
+        if (r.mode === "ffa" || r.players.size >= r.capacity) {
+          startMatch(mapName);
+        } else {
+          io.to(mapName).emit("matchWaiting", {
+            mode: r.mode,
+            needed: r.capacity,
+            players: r.players.size
+          });
+        }
       }
     } else {
       io.to(mapName).emit("playerIdentity", publicPlayer(me));
@@ -406,7 +542,9 @@ io.on("connection", (socket) => {
 
   socket.on("playerMovement", safe("playerMovement", (data) => {
     const ctx = ctxOf(socket);
+
     if (!ctx) return;
+
     const d = obj(data);
     const { me } = ctx;
 
@@ -426,40 +564,64 @@ io.on("connection", (socket) => {
 
   socket.on("hitPlayer", safe("hitPlayer", (data) => {
     const ctx = ctxOf(socket);
+
     if (!ctx) return;
+
     const d = obj(data);
     const { room: r, me } = ctx;
 
     const target = r.players.get(String(d.targetId));
-    if (!target || target.id === me.id || !target.alive || !me.alive) return;
+
+    if (!target || target.id === me.id || !target.alive || !me.alive) {
+      return;
+    }
+
+    // Prevent friendly fire in team modes.
+    if (r.mode !== "ffa" && target.team === me.team) {
+      return;
+    }
 
     const damage = Math.max(0, Math.min(MAX_HP, num(d.damage)));
+
     if (damage <= 0) return;
 
     const weapon = String(d.weapon || "Unknown").slice(0, 20);
 
     target.hp = Math.max(0, target.hp - damage);
-    io.to(target.id).emit("playerHit", { damage, attackerId: me.id, weapon });
 
-    if (target.hp <= 0) killPlayer(mapName, r, target, me, weapon);
+    io.to(target.id).emit("playerHit", {
+      damage,
+      attackerId: me.id,
+      weapon
+    });
+
+    if (target.hp <= 0) {
+      killPlayer(mapName, r, target, me, weapon);
+    }
   }));
 
-  // Deaths are decided server-side in hitPlayer; client reports are ignored.
   socket.on("playerDied", () => {});
 
   socket.on("restartMatch", safe("restartMatch", () => {
     if (!ctxOf(socket)) return;
+
     startMatch(mapName);
   }));
 
   socket.on("chat", safe("chat", (data) => {
     const ctx = ctxOf(socket);
+
     if (!ctx) return;
 
-    const raw = typeof data === "string" ? data : obj(data).text ?? obj(data).message;
+    const raw =
+      typeof data === "string"
+        ? data
+        : obj(data).text ?? obj(data).message;
+
     if (typeof raw !== "string") return;
 
     const text = raw.replace(/[<>]/g, "").trim().slice(0, 140);
+
     if (!text) return;
 
     io.to(mapName).emit("chat", {
@@ -470,84 +632,123 @@ io.on("connection", (socket) => {
     });
   }));
 
-  // First player in a room supplies the pickup spot list.
   socket.on("pickupSpots", safe("pickupSpots", (spots) => {
     const ctx = ctxOf(socket);
+
     if (!ctx || ctx.room.pickups || !Array.isArray(spots)) return;
 
     ctx.room.pickups = spots
       .filter((s) => s && typeof s === "object")
       .slice(0, MAX_PICKUP_SPOTS);
+
     ctx.room.takenPickups.clear();
+
     io.to(mapName).emit("pickupState", ctx.room.pickups);
   }));
 
   socket.on("pickupTaken", safe("pickupTaken", (data) => {
     const ctx = ctxOf(socket);
+
     if (!ctx || !ctx.room.pickups) return;
 
     const d = obj(data);
+
     if (d.kind == null || d.id == null) return;
 
     const exists = ctx.room.pickups.some(
       (p) => p.kind === d.kind && String(p.id) === String(d.id)
     );
+
     if (!exists) return;
 
     const key = pickupKey(d.kind, d.id);
+
     if (ctx.room.takenPickups.has(key)) return;
 
     const r = ctx.room;
-    r.takenPickups.set(key, { kind: d.kind, id: d.id });
-    socket.to(mapName).emit("pickupTaken", { kind: d.kind, id: d.id });
+
+    r.takenPickups.set(key, {
+      kind: d.kind,
+      id: d.id
+    });
+
+    socket.to(mapName).emit("pickupTaken", {
+      kind: d.kind,
+      id: d.id
+    });
 
     setTimeout(() => {
       if (rooms.get(mapName) !== r) return;
+
       r.takenPickups.delete(key);
-      io.to(mapName).emit("pickupRespawn", { kind: d.kind, id: d.id });
+
+      io.to(mapName).emit("pickupRespawn", {
+        kind: d.kind,
+        id: d.id
+      });
     }, PICKUP_RESPAWN_MS);
   }));
 
-  // One rider per vehicle.
   socket.on("mountVehicle", safe("mountVehicle", (data) => {
     const ctx = ctxOf(socket);
+
     if (!ctx) return;
+
     const { room: r, me } = ctx;
 
     const rawId = obj(data).id;
+
     if (rawId == null) return;
+
     const key = String(rawId);
 
     let v = r.vehicles.get(key);
+
     if (!v) {
-      v = { id: rawId, riderId: null, x: 0, z: 0 };
+      v = {
+        id: rawId,
+        riderId: null,
+        x: 0,
+        z: 0
+      };
+
       r.vehicles.set(key, v);
     }
 
     if (v.riderId && v.riderId !== socket.id) {
-      socket.emit("mountDenied", { id: rawId });
+      socket.emit("mountDenied", {
+        id: rawId
+      });
+
       return;
     }
 
     releaseVehicleOf(mapName, r, socket.id);
+
     v.riderId = socket.id;
     me.vehicleId = key;
+
     io.to(mapName).emit("vehicleChanged", { ...v });
   }));
 
   socket.on("dismountVehicle", safe("dismountVehicle", (data) => {
     const ctx = ctxOf(socket);
+
     if (!ctx) return;
+
     const { room: r } = ctx;
     const d = obj(data);
 
     const v = r.vehicles.get(String(d.id));
+
     if (!v || v.riderId !== socket.id) return;
 
     v.riderId = null;
     v.x = num(d.x, v.x);
     v.z = num(d.z, v.z);
+
     ctx.me.vehicleId = null;
+
     io.to(mapName).emit("vehicleChanged", { ...v });
   }));
 
@@ -557,18 +758,31 @@ io.on("connection", (socket) => {
 
       if (r) {
         const me = r.players.get(socket.id);
-        if (me) clearTimeout(me.respawnTimer);
+
+        if (me) {
+          clearTimeout(me.respawnTimer);
+        }
 
         releaseVehicleOf(mapName, r, socket.id);
+
         r.players.delete(socket.id);
 
         socket.to(mapName).emit("playerDisconnected", socket.id);
+
+        if (r.mode !== "ffa" && r.match && r.players.size < r.capacity) {
+          stopRoomTimers(r);
+
+          io.to(mapName).emit("matchWaiting", {
+            mode: r.mode,
+            needed: r.capacity,
+            players: r.players.size
+          });
+        }
 
         if (r.players.size === 0) {
           stopRoomTimers(r);
 
           if (MAP_IDS.includes(mapName)) {
-            // Fixed maps persist, but reset their shared state.
             r.pickups = null;
             r.takenPickups.clear();
             r.vehicles.clear();
@@ -578,15 +792,25 @@ io.on("connection", (socket) => {
         }
       }
 
-      if (isCustom(mapName)) {
-        const published = customMapRooms.get(mapName);
+      if (isCustom(baseMapName)) {
+        const published = customMapRooms.get(baseMapName);
+
         if (published && published.hostSocketId === socket.id) {
-          customMapRooms.delete(mapName);
-          socket.to(mapName).emit("customMapMissing", { roomId: mapName });
+          customMapRooms.delete(baseMapName);
+
+          socket.to(mapName).emit("customMapMissing", {
+            roomId: baseMapName
+          });
         }
       }
 
-      console.log("Player disconnected:", socket.id, "from", mapName);
+      console.log(
+        "Player disconnected:",
+        socket.id,
+        "from",
+        baseMapName,
+        mode
+      );
     } catch (err) {
       console.error("Disconnect cleanup failed:", err);
     }
@@ -601,10 +825,15 @@ server.listen(PORT, "0.0.0.0", () => {
 
 function shutdown(signal) {
   console.log(`${signal} received, shutting down`);
-  for (const room of rooms.values()) stopRoomTimers(room);
+
+  for (const room of rooms.values()) {
+    stopRoomTimers(room);
+  }
+
   io.close(() => {
     server.close(() => process.exit(0));
   });
+
   setTimeout(() => process.exit(0), 5000).unref();
 }
 
